@@ -346,9 +346,13 @@ def main():
         metric_logger = stack.enter_context(
             MetricLogger(Path(cfg.dump_dir) / "metrics.jsonl", cfg)
         )
+        # loop over the ckpt_dir and make sure that we have 
         eval_results = launch_eval(cfg)
         if get_global_rank() == 0:
             metric_logger.log(eval_results, use_step=False)
+            # Write sentinel file to mark eval completion
+            eval_complete_path = Path(cfg.ckpt_dir) / "eval.complete"
+            eval_complete_path.touch()
 
 
 if __name__ == "__main__":

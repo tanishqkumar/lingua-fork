@@ -125,28 +125,40 @@ class CheckpointManager:
     def clean_up(self):
         logger.info("Cleaning up checkpoints...")
         dump_folders = []
-        eval_folders = []
+        eval_complete_folders = []
+        eval_incomplete_folders = []
+        all_eval_folders = []
         other_folders = []
         for p in self.existing_saves:
             is_dump = _get_key_step(p.name) % self.dump_every.every == 0
             is_eval = _get_key_step(p.name) % self.eval_every.every == 0
             if is_dump:
                 dump_folders.append(p)
-            if is_eval:
-                eval_folders.append(p)
+            if is_eval: # wait for evals to complete before removing them!
+                if (p / "eval.complete").exists():
+                    eval_complete_folders.append(p)
+                else:
+                    eval_incomplete_folders.append(p)
+                all_eval_folders.append(p)
             if not (is_dump or is_eval):
                 other_folders.append(p)
 
         logger.info(f"Dump folders: {dump_folders}")
-        logger.info(f"Eval folders: {eval_folders}")
+        logger.info(f"Eval complete folders: {eval_complete_folders}")
+        logger.info(f"Eval incomplete folders: {eval_incomplete_folders}")
+        logger.info(f"All eval folders: {all_eval_folders}")
         logger.info(f"Other folders: {other_folders}")
 
         if self.dump_every.keep > 0:
             dump_folders = dump_folders[-self.dump_every.keep :]
         if self.eval_every.keep > 0:
-            eval_folders = eval_folders[-self.eval_every.keep :]
+            eval_folders_to_keep = set(all_eval_folders[-self.eval_every.keep:])
+            keep_with_incompletes = set(eval_folders_to_keep) | set(eval_incomplete_folders)
+            if not eval_folders_to_keep.issubset(keep_with_incompletes): 
+                diff = eval_folders_to_keep - keep_with_incompletes
+                logger.warning(f"WARNING: Attempted to clean up eval folders, but some are not yet complete. Disk usage may be higher than expected. Incomplete folders: {diff}")
 
-        folder_to_keep = set(other_folders + dump_folders + eval_folders)
+        folder_to_keep = set(other_folders + dump_folders) | keep_with_incompletes
         folder_to_remove = set(self.existing_saves) - folder_to_keep
 
         logger.info(f"Removing folders: {folder_to_remove}")
