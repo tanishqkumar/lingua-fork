@@ -71,13 +71,16 @@ class MetricLogger:
                 **asdict(self.args.logging.wandb),
             )
 
-    def log(self, metrics: Dict[str, Any]):
+    def log(self, metrics: Dict[str, Any], use_step: bool = True):
         if (
             self.args is not None
             and self.args.logging.wandb is not None
             and (wandb.run is not None)
         ):
-            wandb.log(metrics, step=metrics["global_step"])
+            if use_step:
+                wandb.log(metrics, step=metrics["global_step"])
+            else:
+                wandb.log(metrics)
 
         metrics.update({"created_at": datetime.now(timezone.utc).isoformat()})
         print(json.dumps(metrics), file=self.jsonl_writer, flush=True)

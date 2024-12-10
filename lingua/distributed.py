@@ -315,7 +315,7 @@ def check_model_value_range(
             param = param.to_local()
 
         if param.numel() == 0:
-            logger.warning(f"Model parameter {name} is empty, probably because of FSDP sharding")
+            
             continue
 
         if torch.isnan(param).any() or torch.isinf(param).any():
@@ -343,6 +343,7 @@ def init_signal_handler(callable):
     Handle signals sent by SLURM for time limit / pre-emption.
     """
     signal.signal(signal.SIGUSR2, callable)
+    signal.signal(signal.SIGTERM, callable)
     logger.warning("Signal handler installed.")
 
 
@@ -366,14 +367,15 @@ def clean_env():
         "WORLD_SIZE",
         "LOCAL_RANK",
         "LOCAL_WORLD_SIZE",
-        "TORCHELASTIC_RUN_ID",
+        #"TORCHELASTIC_RUN_ID",
         "DORA_FORCE_DISTRIB",
+        "ROLE_WORLD_SIZE"
     )
     cluster_env = {
         x: os.environ.pop(x)
         for x in os.environ
         if x.startswith(
-            ("SLURM_", "SLURMD_", "SRUN_", "SBATCH_", "SUBMITIT_", "WANDB_")
+            ("SLURM_", "SLURMD_", "SRUN_", "SBATCH_", "SUBMITIT_", "WANDB_", "TORCHELASTIC_")
         )
         or x in distrib_names
     }

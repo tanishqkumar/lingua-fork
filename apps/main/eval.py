@@ -13,14 +13,17 @@ from typing import Any, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
+import contextlib
 from apps.main.generate import (
     PackedCausalTransformerGenerator,
     PackedCausalTransformerGeneratorArgs,
     load_consolidated_model_and_tokenizer,
 )
 from apps.main.transformer import LMTransformer, LMTransformerArgs
-from lingua.args import dump_config
+from lingua.args import dump_config, flatten_dict
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
+from lingua.metrics import MetricLogger, LoggingArgs
+from lingua.tokenizer import Tokenizer
 from lingua.data import init_choice_state, setup_sources
 from lingua.distributed import (
     DistributedArgs,
@@ -79,7 +82,7 @@ class EvalArgs:
     harness: Optional[LMHarnessArgs] = field(default_factory=LMHarnessArgs)
     validation: Optional[ValidationArgs] = field(default_factory=ValidationArgs)
 
-    wandb: Optional[Any] = None
+    logging: LoggingArgs = field(default_factory=LoggingArgs)
 
     global_step: Optional[int] = None  # for in-training evaluation
 
@@ -230,8 +233,7 @@ def launch_eval(cfg: EvalArgs):
         if not consolidate_path.exists() and get_global_rank() == 0:
             consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
 
-    Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
-    dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
+    #### 
 
     consolidate_path = str(consolidate_path)
     torch.distributed.barrier()
@@ -241,23 +243,39 @@ def launch_eval(cfg: EvalArgs):
         model_cls=LMTransformer,
         model_args_cls=LMTransformerArgs,
     )
+    torch.distributed.barrier()
     logger.info("Model loaded")
+    log_results = run_eval(cfg, model, tokenizer)
+    # Move model to CPU and delete it to free up memory, this is a temporary fix
+    model.cpu()
+    del model
+    return log_results
+
+
+def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
+    
+    Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
+    dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
+
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)
     results = simple_evaluate(wrap, **asdict(cfg.harness))
-    val_results =  None
-    if cfg.validation:
-        val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             f.write(json.dumps(results))
-        logger.info(f"All evaluation results: {results['results']}")
-        if val_results is not None:
-            with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
-                f.write(json.dumps(val_results))
-            logger.info(f"All validation results: {val_results}")
+        logger.info(f"Raw evaluation results: {results}")
+        log_results = results["results"]
+        log_results = {k: {k2: v2 for k2, v2 in v.items() if k2 != "alias"} for k, v in log_results.items()}
+        log_results = {"eval/" + m.replace(".", "/"): v for m, v in log_results.items()}
+        log_results = flatten_dict(log_results)
+        if cfg.global_step is not None:
+            log_results["global_step"] = cfg.global_step
+        logger.info(f"All evaluation results: {log_results}")
+    else:
+        log_results = None
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
 
@@ -268,20 +286,13 @@ def launch_eval(cfg: EvalArgs):
         if cfg.global_step is not None:
             timestamp["global_step"] = cfg.global_step
         print(
-            json.dumps(timestamp | results["results"]),
+            json.dumps(timestamp | log_results),
             file=open(metric_log_path, mode="a"),
             flush=True,
         )
-
-        val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
-        if val_results is not None:
-            print(
-                json.dumps(timestamp | val_results),
-                file=open(val_log_path, mode="a"),
-                flush=True,
-            )
-    
     del generator
+
+    return log_results
 
 
 def main():
@@ -331,7 +342,13 @@ def main():
     default_cfg = OmegaConf.structured(EvalArgs())
     cfg = OmegaConf.merge(default_cfg, file_cfg, cli_args)
     cfg = OmegaConf.to_object(cfg)
-    launch_eval(cfg)
+    with contextlib.ExitStack() as stack:
+        metric_logger = stack.enter_context(
+            MetricLogger(Path(cfg.dump_dir) / "metrics.jsonl", cfg)
+        )
+        eval_results = launch_eval(cfg)
+        if get_global_rank() == 0:
+            metric_logger.log(eval_results, use_step=False)
 
 
 if __name__ == "__main__":

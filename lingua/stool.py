@@ -17,13 +17,13 @@ class StoolArgs:
     config: Any = None
     launcher: str = "sbatch"  # Can be sbatch or bash if already in salloc
     script: str = "apps.main.train"  # The script to run.
-    copy_code: bool = True  # Wether to copy code to dump dir
+    copy_code: bool = False  # Wether to copy code to dump dir
     dirs_exists_ok: bool = (
         False  # Wether to copy new code and config and run regardless that dir exists
     )
     override: bool = False  # Wether to delete dump dir and restart
     nodes: int = -1  # The number of nodes to run the job on.
-    ngpu: int = 8  # The number of GPUs required per node.
+    ngpu: int = 1  # The number of GPUs required per node.
     ncpu: int = 16  # The number of CPUs allocated per GPU.
     mem: str = ""  # The amount of memory to allocate.
     anaconda: str = "default"  # The path to the anaconda environment.
@@ -50,8 +50,8 @@ SBATCH_COMMAND = """#!/bin/bash
 #SBATCH --partition={partition}
 #SBATCH --mem={mem}
 
-#SBATCH --output={dump_dir}/logs/%j/%j.stdout
-#SBATCH --error={dump_dir}/logs/%j/%j.stderr
+#SBATCH --output={dump_dir}/logs.out
+#SBATCH --error={dump_dir}/logs.err
 
 #SBATCH --open-mode=append
 #SBATCH --signal=USR2@120
@@ -137,7 +137,9 @@ def validate_args(args) -> None:
             )
         else:
             args.anaconda = f"{args.anaconda}/bin/python"
-        assert os.path.isfile(args.anaconda)
+        # Assert that either anaconda is a valid file path or CONDA_ENV_PATH is set
+        assert os.path.isfile(args.anaconda) or os.environ.get("CONDA_ENV_PATH"), \
+            "Either anaconda must be a valid file path or CONDA_ENV_PATH environment variable must be set"
 
     args.mem = args.mem or "0"
 
@@ -175,10 +177,14 @@ def launch_job(args: StoolArgs):
     with open(f"{dump_dir}/base_config.yaml", "w") as cfg:
         cfg.write(OmegaConf.to_yaml(args.config))
 
-    conda_exe = os.environ.get("CONDA_EXE", "conda")
-    conda_env_path = os.path.dirname(os.path.dirname(args.anaconda))
+    assert os.environ.get("CONDA_PATH"), "CONDA_PATH environment variable must be set"
+    conda_exe = os.environ.get("CONDA_PATH", "conda")
+    if os.path.isfile(args.anaconda):
+        conda_env_path = os.path.dirname(os.path.dirname(args.anaconda))
+    else:
+        conda_env_path = os.environ.get("CONDA_ENV_PATH", "")
     log_output = (
-        "-o $DUMP_DIR/logs/%j/%j_%t.out -e $DUMP_DIR/logs/%j/%j_%t.err"
+        "-o $DUMP_DIR/logs.out -e $DUMP_DIR/logs.err"
         if not args.stdout
         else ""
     )

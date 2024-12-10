@@ -1,345 +1,109 @@
-# Meta Lingua
+# Meta-lingua fork for the Stanford CS cluster / miso
 
-**Mathurin Videau***, **Badr Youbi Idrissi***, Daniel Haziza, Luca Wehrstedt, Jade Copet, Olivier Teytaud, David Lopez-Paz. ***Equal and main contribution**
+This fork contains some minimal changes necessary to get standard, simple configs to run on the NLP cluster and the miso queue.
 
-Meta Lingua is a minimal and fast LLM training and inference library designed for research. Meta Lingua uses easy-to-modify PyTorch components in order to try new architectures, losses, data, etc. We aim for this code to enable end to end training, inference and evaluation as well as provide tools to better understand speed and stability. While Meta Lingua is currently under development, we provide you with multiple `apps` to showcase how to use this codebase.
+For documentation of lingua, see [the original lingua repo](https://github.com/facebookresearch/lingua)
 
-<p align="center">  
- <img src="lingua_overview.svg" width="100%"/>
-</p>
+## Quickstart
 
-## Quick start
-
-The following commands launch a SLURM job that creates an environment for Meta Lingua.
-The env creation should take around 5 minutes without counting downloads. 
-
+First, symlink the data dir to the shared cluster data directory
 ```bash
-git clone https://github.com/facebookresearch/lingua
-cd lingua
-
+ln -sf /juice5/scr5/nlp/data/huggingface/lingua-data/ data
+```
+Next, build the conda environment
+```bash
 bash setup/create_env.sh
-# or if you have access to a SLURM cluster
-sbatch setup/create_env.sh
 ```
-Once that is done your can activate the environment 
+
+Symlink the output directory to a fast shared storage device. Be sure to change the path to your own directory! Also, `/sphinx` requires a quota which you can get from contacting CS IT.
 ```bash
-conda activate lingua_<date>
+ln -sf /sphinx/u/thashim/lingua-checkpoints out
 ```
-use the provided script to download and prepare data from huggingface (among `fineweb_edu`, `fineweb_edu_10bt`, or `dclm_baseline_1.0`).
-This command will download the `fineweb_edu` and prepare it for training in the `./data` directory, specifying the amount of memory `terashuf` (the tool used to shuffle samples) will be allocated. By default, the number of chunks (`nchunks`) is 32. If you are running on fewer than 32 GPUs, it is recommended to set `nchunks` to 1 or to match `nchunks` with the number of GPUs (`nchunks` = NGPUs). See [here](https://github.com/facebookresearch/lingua/issues/55#issuecomment-2483643076) for more details.
+
+*Warning slow!* Alternatively, make an output directory on juice.
 ```bash
-python setup/download_prepare_hf_data.py fineweb_edu <MEMORY> --data_dir ./data --seed 42 --nchunks <NCHUNKS>
+mkdir -p out/
 ```
-to download tokenizer (here llama3), use the folowing script:
+
+Edit the config file - you should set things like the wandb project names in `apps/main/configs/llama_1B_8H200.yaml`. You can now run the sbatch example for the 1b model with 8GPUs.
+
+Here's the example for Tatsu's setup - be sure to double check your configs -  BASE_DIR, CONDA_ENV_PATH, CONDA_PATH, and the email should all be set to your own values. BASE_DIR should point to the root of your lingua-fork repo. CONDA_PATH you can get via `which conda`. 
 ```bash
-python setup/download_tokenizer.py llama3 <SAVE_PATH> --api_key <HUGGINGFACE_TOKEN>
+export BASE_DIR=/juice5/scr5/thashim/lingua-test/lingua-fork
+export CONDA_PATH=/juice5/scr5/thashim/miniconda3/bin/conda
+export CONDA_ENV_PATH=/juice5/scr5/thashim/miniconda3/envs/lingua_241127
+cd $BASE_DIR
+export CONFIG_FILE=apps/main/configs/llama_1B_8H200.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm 
 ```
-Now launch a debug job to check if everything works.  **The provided configurations are templates, you need to adapt them for them to work (change `dump_dir`, `data.root_dir`, `data.tokenizer.path`, etc ...)**
+Note that CONDA_PATH and CONDA_ENV_PATH are used during async eval in `stool.py` so these should be set even if you dont need them in the sbatch script.
 
+# Other examples
+
+Doing learning rate sweeps is straightforward using the option override features of lingua. An example is in `scripts/lr_sweep.sh`.
 ```bash
-# stool stands for SLURM tool !
-python -m lingua.stool script=apps.main.train config=apps/main/configs/debug.yaml nodes=1 partition=<partition>
-# if you want to launch locally you can use torchrun
-torchrun --nproc-per-node 8 -m apps.main.train config=apps/main/configs/debug.yaml
-# or you can also launch on 1 GPU
-python -m apps.main.train config=apps/main/configs/debug.yaml
+scripts/lr_sweep.sh
 ```
 
-When using `stool`, if a job crashes, it can be relaunched using sbatch:
+Since lingua does precise, full-state checkpointing, you can use preemptible GPUs if you want
 ```bash
-sbatch path/to/dump_dir/submit.slurm
-```
-## Training Results 
-
-We get very strong performance on many downstream tasks and match the performance of [DCLM baseline 1.0](https://arxiv.org/abs/2406.11794).
-
-### 1B models on 60B DCLM tokens
-| name           | arc_challenge | arc_easy | boolq |  copa | hellaswag |  obqa |  piqa |  siqa | winogrande |  nq  |  tqa  |
-|----------------|:-------------:|:--------:|:-----:|:-----:|:---------:|:-----:|:-----:|:-----:|:----------:|:----:|:-----:|
-| Transformer 1B |     36.48     |   62.83  | 62.57 | 79.00 |   63.62   | 37.40 | 75.14 | 45.19 |    61.64   | 8.75 | 26.31 |
-| minGRU 1B      |     30.82     |   57.89  | 62.05 | 74.00 |   50.27   | 37.00 | 72.31 | 43.76 |    52.49   | 3.24 |  9.03 |
-| minLSTM 1B     |     31.76     |   60.04  | 62.02 | 73.00 |   53.39   | 36.40 | 72.36 | 45.09 |    52.80   | 4.52 | 12.73 |
-| Hawk 1B        |     34.94     |   63.68  | 62.42 | 76.00 |   63.10   | 38.20 | 73.23 | 46.01 |    55.33   | 8.42 | 23.58 |
-| Mamba 1B       |     35.54     |   63.42  | 62.63 | 74.00 |   64.16   | 38.80 | 75.24 | 45.14 |    60.14   | 8.84 | 26.64 |
-
-### 7B models
-
-| name                             | arc_challenge | arc_easy | boolq | copa  | hellaswag | obqa  | piqa  | siqa  | winogrande | mmlu  | nq    | tqa   | bbh   |
-|----------------------------------|---------------|----------|-------|-------|-----------|-------|-------|-------|------------|-------|-------|-------|-------|
-| Mamba 7B 200B tokens             | 47.21         | 76.03    | 65.63 | 84.00 | 77.80     | 44.00 | 80.25 | 49.69 | 70.24      | 32.81 | 20.53 | 51.93 | 20.35 |
-| Llama 7B 200B tokens             | 46.95         | 75.73    | 64.80 | 84.00 | 77.45     | 45.00 | 80.20 | 48.26 | 70.32      | 48.64 | 20.66 | 51.01 | 31.47 |
-| Llama 7B squared relu 1T tokens  | 49.61         | 76.74    | 72.45 | 89.00 | 81.19     | 44.80 | 82.05 | 49.95 | 72.14      | 60.56 | 25.68 | 59.52 | 42.11 |
-
-## Project overview
-
-Meta Lingua is structured as follows:
-
-```
-📦meta-lingua
- ┣ 📂lingua # Core library
- ┃ ┣ 📜args.py
- ┃ ┣ 📜checkpoint.py
- ┃ ┣ 📜data.py
- ┃ ┣ 📜distributed.py
- ┃ ┣ 📜float8.py
- ┃ ┣ 📜logger.py
- ┃ ┣ 📜metrics.py
- ┃ ┣ 📜optim.py
- ┃ ┣ 📜probe.py
- ┃ ┣ 📜profiling.py
- ┃ ┣ 📜stool.py
- ┃ ┣ 📜tokenizer.py
- ┃ ┗ 📜transformer.py
- ┣ 📂setup
- ┃ ┣ 📜create_env.sh
- ┃ ┗ 📜download_prepare_hf_data.py
- ┗ 📂apps # Apps that put components together
-   ┣ 📂main # Main language modeling app with llama
-   ┃ ┣ 📂configs
-   ┃ ┣ 📜eval.py
-   ┃ ┣ 📜generate.py
-   ┃ ┣ 📜train.py
-   ┃ ┗ 📜transformer.py
-   ┣ 📂fastRNN 
-   ┃ ┣ 📂component
-   ┃ ┣ 📂hawk
-   ┃ ┣ 📂minGRU
-   ┃ ┣ 📂minLSTM
-   ┣ 📂mamba
-   ┣ 📂mtp # Multi token prediction
-   ┗ 📂plots
+export CONFIG_FILE=apps/main/configs/llama_1B_48G.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/preemptible_1.slurm
 ```
 
-The `lingua` folder contains some essential and reusable components, while the `apps` folder contains scripts that put those components together. For instance the main training loop is in `apps/main`. We highly encourage you to use that as a template and modify it however you please to suit your experiments. 
-
-Nothing is sacred in Meta Lingua. We've specifically tried to make it as easily modifiable as possible! So feel free to branch out and modify anything. 
-
-Here's a quick description of the most important files and features:
-
-- **`transformer.py`** : Defines model architecture. This is pure PyTorch `nn.Module` ! Nothing fancy here. 
-- **`distributed.py`** : Handles distributing the model on multiple GPUs. This is done through `parallelize_module` function which wraps your vanilla `nn.Module` and applies nearly any combination of Data Parallel, Fully Sharded Data Parallel, Model Parallelism, `torch.compile`, activation checkpointing and `float8`. 
-- **`data.py`** : Dataloader for LLM pretraining.
-
-<p align="center">  
- <img src="dataloader.png" width="40%"/>
-</p>
-
-- **`profiling.py`** : Small wrapper around xformers' profiler which provides automatic MFU and HFU calculation and dumps profile traces in profiling folder in your dump directory. It also has memory profiling trace. 
-- **`checkpoint.py`** : Manages model checkpoints. It saves model in checkpoints folder in your dump dir in .distcp format which is the new PyTorch distributed saving method. This format allows to reload the model with a different number of GPUs and with a different sharding. You can also convert those into normal PyTorch checkpoints with `torch.distributed.checkpoint.format_utils.dcp_to_torch_save` and the other way around `torch_save_to_dcp`.
-- **`args.py`** : Utilities to work with configs. 
-
-## Configuration
-
-Most components need configuration and we chose to use data classes to represent these configuration objects. `args.py` helps with converting between `config.yaml` and config dictionaries into the respective data classes. 
-
-So for examples the `TrainArgs` in `apps/main/train.py` has a `LMTransformerArgs`, `OptimArgs`, etc ... as children. 
-
-Here is an example configuration file that will be converted to `TrainArgs`:
-
-```yaml
-# This is where Meta Lingua will store anything related to the experiment. 
-dump_dir: /path/to/dumpdir
-name: "debug"
-steps: 1000
-
-seed: 12
-
-optim:
-    lr: 3e-4
-    warmup: 2000
-    lr_min_ratio: 0.000001
-    clip: 10.0
-
-distributed:
-    fsdp_type: full_shard
-    compile: true
-    selective_activation_checkpointing: false
-
-model:
-    dim: 1024
-    n_layers: 8
-    n_heads: 8
-
-data:
-    root_dir: data/shuffled
-    sources:
-      wikipedia: 80.0
-      arxiv: 20.0
-    batch_size: 32
-    seq_len: 1024
-    load_async: true
-    tokenizer:
-        name: sp
-        path: tokenizers/llama2.model
-```
-
-
-## Launching jobs
-
-### Command line arguments
-
-The command line interface in all scripts (`train.py`, `eval.py`, `stool.py`) uses [OmegaConf](https://omegaconf.readthedocs.io/en/2.3_branch/usage.html#from-command-line-arguments)
-This accepts arguments as a dot list
-So if the dataclass looks like
-```python
-@dataclass
-class DummyArgs:
-    name: str = "blipbloup"
-    mode: LMTransformerArgs = LMTransformerArgs()
-    
-@dataclass
-class LMTransformerArgs:
-    dim: int = 512
-    n_layers: int = 12
-```
-
-Then you can pass `model.dim = 32` to change values in `LMTransformerArgs`
-or just `name = tictac` for top level attributes.
-
-**`train.py`** simply takes as argument the path to a config file and will load that config. The behavior here is as follows:
-1. We instantiate `TrainArgs` with its default values
-2. We override those default values with the ones in the provided config file
-3. We override the result with the additional arguments provided through command line
-
-If we take the `DummyArgs` example above, calling `train.py` with `train.py config=debug.yaml model.dim=64 name=tictac` 
-where `debug.yaml` contains 
-```yaml
-model:
-    n_layers: 24
-```
-will launch training with the config 
-```python
-DummyArgs(name="tictac", LMTransformerArgs(dim=64, n_layers=24))
-```
-
-### Launching with SLURM
-
-Since we want to do distributed training, we need `train.py` to run N times (with N being the number of GPUs)
-
-The easiest way to do this is through SLURM. And in order to make that simpler, we provide `lingua/stool.py` which is a simple python script that 
-1. Saves the provided config to `dump_dir`
-2. Copies your current code to `dump_dir` in order to back it up 
-3. Creates an sbatch file `submit.slurm` which is then used to launch the job with the provided config. 
-
-It can either be used through command line 
-
+You can also do multi-node, 24 GPU model training for a 1B model as an example
 ```bash
-python -m lingua.stool config=apps/main/configs/debug.yaml nodes=1 account=fair_amaia_cw_codegen qos=lowest
+export CONFIG_FILE=apps/main/configs/llama_1B_24H200.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_24.slurm
 ```
 
-Or the `launch_job` function directly. This allows you for example to create many arbitrary configs (to sweep parameters, do ablations) in a jupyter notebook and launch jobs directly from there. 
-
-Since the configuration file is copied to `dump_dir`, an easy way to iterate is to simply change the config file and launch the same command above. 
-
-## Debugging
-In order to iterate quickly, it is preferable not to have to wait for a SLURM allocation every time. You can instead ask SLURM to allocate resources for you, then once they're allocated you can run multiple commands on that same allocation. 
-
-For example you can do :
-
+If you want your runs to be completely deterministic, you can use the deterministic flag here. This also shows an example of using the sphinx queue instead of miso.
 ```bash
-salloc --nodes 2 --cpus-per-gpu 16 --mem 1760GB --gres=gpu:8 --exclusive --time=72:00:00
+export CONFIG_FILE=apps/main/configs/llama_280M_48G_1.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/sphinx_1.slurm
 ```
 
-Which will give you access to 2 nodes in your current terminal. Once the allocation is done, you will see some SLURM environement variables that were automatically added such as `$SLURM_JOB_ID` and others... This allows you for example to do in the same terminal
 
+# Other configs 
+A 'fast' config that finishes in 1 hour is a 280M model which we get via
 ```bash
-srun -n 16 python -m apps.main.train config=apps/main/configs/debug.yaml
+export CONFIG_FILE=apps/main/configs/llama_280M_8H200.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm
 ```
 
-Which will run the `python -m apps.main.train config=apps/main/configs/debug.yaml` command on each of the 16 GPUs. If this crashes or ends you can just relaunch `srun` again because the nodes are already allocated to you and you don't have to wait for SLURM to give you the resources again.
-
-This will also show you the outputs of all those commands in the same terminal which might become cumbersome. 
-
-Instead you can use `stool` directly to configure logs to be separated into different files per GPU.
-
+If you want to try using the preemptible queue with 4 GPUs, remember to have gradient accumulation, as you see here
 ```bash
-python -m lingua.stool config=apps/main/configs/debug.yaml nodes=2 launcher=bash dirs_exists_ok=true
+export CONFIG_FILE=apps/main/configs/llama_1B_48Gx4-32acc.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/preemptible_4.slurm
 ```
 
-Notice that we added **`launcher=bash`** which basically means that the generated `submit.slurm` will simply be executed instead of submitting it through `sbatch`. The `submit.slurm` has an `srun` command also so this is very similar to the above `srun` command. We also add **`dirs_exists_ok=true`** to tell `stool` that it is okay to override things in an existing folder (code, config, etc)
-
-If you want to use `pdb` to step through your code, you should use `-n 1` to run only on 1 GPU. 
-
-## Evaluations
-
-Evaluations can run either during training periodically or you directly launch evals on a given checkpoint as follows:
-
+Finally, miso should be able to train a 7B model as well - a chinchilla optimal model takes 9.5 days on 8 GPUs.on 24 GPUs.
 ```bash
-srun -n 8 python -u -m apps.main.eval config=apps/main/configs/eval.yaml
+export CONFIG_FILE=apps/main/configs/llama_7B_8H200.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm
 ```
 
-You need to specify the checkpoint and dump dir of the evaluation in that config
-
-Or through `stool` with
-
-```bash
-python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml nodes=1 account=fair_amaia_cw_codegen qos=lowest
+# Data related notes
+Here is an example entry (from a fineweb sample) in the jsonl file. The fileloader *only* cares about fields named either `text` or `content`.
+```json
+{"text":"|Henry Gray (18251861). Anatomy of the Human Body. 1918.|\n|tubercle on its posterior surface, medial to the groove for the tendon of the Flexor hallucis longus. The deep fibers (anterior talotibial) are attached, above, to the tip of the medial malleolus, and, below, to the medial surface of the talus. The deltoid ligament is covered by the tendons of the Tibialis posterior and Flexor digitorum longus.|\n| The anterior and posterior talofibular and the calcaneofibular ligaments were formerly described as the three fasciculi of the external lateral ligament of the ankle-joint.|\nThe Anterior Talofibular Ligament. (ligamentum talofibulare anterius) (Fig. 355).The anterior talofibular ligament, the shortest of the three, passes from the anterior margin of the fibular malleolus, forward and medially, to the talus, in front of its lateral articular facet.\nThe Posterior Talofibular Ligament (ligamentum talofibulare posterius) (Fig. 355).The posterior talofibular ligament, the strongest and most deeply seated, runs almost horizontally from the depression at the medial and back part of the fibular malleolus to a prominent tubercle on the posterior surface of the talus immediately lateral to the groove for the tendon of the Flexor hallucis longus.\nThe Calcaneofibular Ligament (ligamentum calcaneofibulare) (Fig. 355).The calcaneofibular ligament, the longest of the three, is a narrow, rounded cord, running from the apex of the fibular malleolus downward and slightly backward to a tubercle on the lateral surface of the calcaneus. It is covered by the tendons of the Peronæi longus and brevis.\nFIG. 356 Capsule of left talocrura articulation (distended). Lateral aspect. (See enlarged image)\nSynovial Membrane (Fig. 356).The synovial membrane invests the deep surfaces of the ligaments, and sends a small process upward between the lower ends of the tibia and fibula.\nRelations.The tendons, vessels, and nerves in connection with the joint are, in front, from the medial side, the Tibialis anterior, Extensor hallucis proprius, anterior tibial vessels, deep peroneal nerve, Extensor digitorum longus, and Peronæus tertius; behind, from the medial side, the Tibialis posterior, Flexor digitorum longus, posterior tibial vessels, tibial nerve, Flexor hallucis longus; and, in the groove behind the fibular malleolus, the tendons of the Peronæi longus and brevis.\n| The arteries supplying the joint are derived from the malleolar branches of the anterior tibial and the peroneal.|\n| The nerves are derived from the deep peroneal and tibial.|\nMovements.When the body is in the erect position, the foot is at right angles to the leg. The movements of the joint are those of dorsiflexion and extension; dorsiflexion consists in the","id":"<urn:uuid:8cd958a8-013d-4fc6-91dd-ce0778145d63>","metadata":{"dump":"CC-MAIN-2018-05","url":"http://www.bartleby.com/107/pages/page351.html","file_path":"s3://commoncrawl/crawl-data/CC-MAIN-2018-05/segments/1516084891706.88/warc/CC-MAIN-20180123032443-20180123052443-00542.warc.gz","language":"en","language_score":0.7337160110473633,"token_count":721,"score":2.734375,"int_score":3}}
 ```
 
-## Dump dir structure
+# Notes - disk space and fast checkpointing
 
-```
-📂example_dump_dir
- ┣ 📂checkpoints
- ┃ ┣ 📂0000001000
- ┃ ┣ 📂0000002000
- ┃ ┣ 📂0000003000
- ┃ ┣ 📂0000004000
- ┃ ┣ 📂0000005000
- ┃ ┣ 📂0000006000
- ┃ ┣ 📂0000007000 # Checkpoint and train state saved every 1000 steps here
- ┃ ┃ ┣ 📜.metadata
- ┃ ┃ ┣ 📜__0_0.distcp
- ┃ ┃ ┣ 📜__1_0.distcp
- ┃ ┃ ┣ 📜params.json
- ┃ ┃ ┣ 📜train_state_00000.json
- ┃ ┃ ┗ 📜train_state_00001.json
- ┣ 📂code # Backup of the code at the moment the job was launched
- ┣ 📂logs
- ┃ ┗ 📂166172 # Logs for each GPU in this SLURM job.
- ┃ ┃ ┣ 📜166172.stderr
- ┃ ┃ ┣ 📜166172.stdout
- ┃ ┃ ┣ 📜166172_0.err
- ┃ ┃ ┣ 📜166172_0.out
- ┃ ┃ ┣ 📜166172_1.err
- ┃ ┃ ┗ 📜166172_1.out
- ┣ 📂profiling
- ┃ ┣ 📂memory_trace_plot # Trace of memory usage through time for all GPUs
- ┃ ┃ ┣ 📜000102_h100-192-145_451082.html
- ┃ ┃ ┣ 📜000102_h100-192-145_451083.html
- ┃ ┗ 📂profile_CPU_CUDA_000104 # Profiling traces for all GPUs
- ┃ ┃ ┣ 📜h100-192-145_451082.1720183858874741723.pt.trace.json.gz
- ┃ ┃ ┗ 📜h100-192-145_451083.1720183858865656716.pt.trace.json.gz
- ┣ 📜base_config.yaml
- ┣ 📜config.yaml
- ┣ 📜metrics.jsonl
- ┗ 📜submit.slurm
-```
+Disk sizes needed for checkpoints from inspecting some runs
+| Model | Size |
+|-------|------|
+| 7B | 85GB |
+| 1B | 40GB |
 
-## Related repositories
+Be careful not to checkpoint too often on the fast SSDs since you will fill the quota and crash.
 
-Here we highlight some related work that is complementary to this one. Most important being [torchtitan](https://github.com/pytorch/torchtitan) and [torchtune](https://github.com/pytorch/torchtune). 
 
-Lingua is designed for researchers who want to experiment with new ideas for LLM pretraining and get quick feedback on both training/inference speed and downstream benchmarks. Our goal is to lower the barrier to entry for LLM research by providing a lightweight and focused codebase.
+# Changelog
 
-We see torchtitan, torchtune, and lingua as complementary tools. Torchtitan is excellent for large-scale work because it features 3D parallelism and is likely to integrate the latest PyTorch distributed training features more quickly, thanks to its close ties to the PyTorch team. On the other hand, Torchtune excels at fine-tuning, especially when GPU resources are limited, by offering various fine-tuning strategies like LoRA, QLoRA, DPO, and PPO.
-
-A typical workflow could look like this: you might first test a new idea in Lingua, then scale it up further with Torchtitan, and finally use Torchtune for instruction or preference fine-tuning.
-
-Although there's definitely some overlap among these codebases, we think it's valuable to have focused tools for different aspects of LLM work. For example, Torchtitan aims to showcase the latest distributed training features of PyTorch in a clean, minimal codebase, but for most research, you really don't need every feature PyTorch has to offer or the capability to scale to 100B parameters on 4096 GPUs. For instance, we think that FSDP + torch compile will cover 90% of all needs of a researcher. With lingua, we tried to ask "What's the minimal set of features needed to draw solid conclusions on the scalability of idea X?"
-
-We believe this targeted approach helps researchers make progress faster without the mental overhead of using many techniques that might not be needed.
-
-## Citation
-
-```
-@misc{meta_lingua,
-  author = {Mathurin Videau, Badr Youbi Idrissi, Daniel Haziza, Luca Wehrstedt, Jade Copet, Olivier Teytaud, David Lopez-Paz},
-  title = {{Meta Lingua}: A minimal {PyTorch LLM} training library},
-  url = {https://github.com/facebookresearch/lingua},
-  year = {2024}
-}
-```
-## License
-
-Meta Lingua is licensed under BSD-3-Clause license. Refer to the LICENSE file in the top level directory.
+12/10/2024 (v0)
+- Added sbatch scripts and setup that works without stool
+- Traps SIGTERM in addition to SIGUSR2 since the stanford SLURM config does not send user signals on preemption
+- Modifications to the async eval script to work with the cluster, and also to fix bugs in `stool.py`, `eval.py` and `distributed.py`
+- Added a deterministic mode, and verified deterministic training when the flag is on. Also verified that the model can be loaded from a checkpoint and continue exactly

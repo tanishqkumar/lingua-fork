@@ -1,0 +1,96 @@
+# dump_dir: !!!CHANGE_THIS!!!
+dump_dir: out/llama_280M_8H200
+name: llama_280M_8H200
+# chinchilla optimal tokens = 5.5 billion
+steps: 21_206  # 5.5 billion / 16*2048*8 tokens per step
+probe_freq: null
+seed: 777
+
+optim:
+  lr: 5e-4
+  weight_decay: 0.1
+  warmup: 500
+  lr_min_ratio: 0.000001
+  clip: 1.0
+
+distributed:
+  fsdp_type: no_shard
+  dp_replicate: 8
+  compile: true
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 1024
+  n_layers: 18
+  n_heads: 16
+  # number of non-embedding params = 12*18*1024**2 = 226492416
+  # number of embedding params = 50257*1024 = 51362816
+  # total params = 226492416 + 51362816 = 277955584
+
+data:
+  root_dir: /juice5/scr5/nlp/data/huggingface/lingua-data/
+  sources:
+    fineweb_edu_10bt_shuffled: 100.0
+  batch_size: 16
+  prefetch_size: 1024
+  seq_len: 2048
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: tiktoken
+    path: /juice5/scr5/nlp/data/huggingface/lingua-data/llama_tokenizer/original/tokenizer.model
+
+profiling:
+  run: false
+  mem_warmup: 0
+  mem_steps: 4
+  profile_warmup: 100
+  profile_steps: 4
+
+checkpoint:
+  dump: # dump and checkpoint twice in the run..
+    every: 10603
+    keep: 1
+  eval:
+    every: 10603
+    keep: 1
+
+logging:
+  freq: 1
+  wandb:
+    project: lingua-tests
+    name: llama_280M_8H200
+
+async_eval_gpus: 1
+eval:
+  harness:
+    tasks:
+      - hellaswag
+      - task: boolq
+        dataset_kwargs:
+          trust_remote_code: true
+      - piqa
+      - winogrande
+      - arc_easy
+      - race
+      - commonsense_qa
+  validation: null
+  generator:
+    max_tokens: 16384
+    dtype: bf16
+
+# slurm is used for async eval
+slurm:
+  account: nlp
+  partition: jag-standard
+  ngpu: 1
+  ncpu: 16
+  constraint: "[48G|80G|141G]"
+  mem: 64G
+  anaconda: lingua_241127
+  time: 1440  # 24 hours

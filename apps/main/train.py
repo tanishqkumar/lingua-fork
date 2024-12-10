@@ -78,6 +78,7 @@ class TrainArgs:
     dump_dir: str = ""
 
     seed: int = 42
+    deterministic: bool = False
 
     # Number of gradient accumulation steps
     # Total batch size is batch_size*grad_acc_steps
@@ -101,6 +102,7 @@ class TrainArgs:
 
     # If set to None, eval is run locally otherwise it launches a new job with the given number of gpus
     async_eval_gpus: Optional[int] = None
+    slurm: StoolArgs = field(default_factory=StoolArgs)
     eval: Optional[Any] = None
 
 
@@ -110,6 +112,7 @@ class TrainState(Stateful):
     acc_step: int  # Nb of accumulation steps done since last optimizer step
     scheduler: lr_scheduler.LambdaLR
     data_loader_state: PackTokensState
+    wandb_id: Optional[str] = None
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -117,6 +120,7 @@ class TrainState(Stateful):
             "acc_step": self.acc_step,
             "data_loader_state": self.data_loader_state,
             "scheduler": self.scheduler.state_dict(),
+            "wandb_id": self.wandb_id,
         }
 
     def load_state_dict(self, state_dict):
@@ -124,7 +128,7 @@ class TrainState(Stateful):
         self.acc_step = state_dict["acc_step"]
         self.data_loader_state = PackTokensState(**state_dict["data_loader_state"])
         self.scheduler.load_state_dict(state_dict["scheduler"])
-
+        self.wandb_id = state_dict["wandb_id"]
 
 def validate_train_args(args: TrainArgs, output_size: int):
     if args.model.vocab_size < 0:
@@ -229,6 +233,15 @@ def train(args: TrainArgs):
             dump_config(args, Path(args.dump_dir) / "config.yaml")
         init_logger(Path(args.dump_dir) / "train.log")
         init_signal_handler(set_preemption_flag)  # For handling preemption signals.
+        if args.deterministic:
+            logger.warning("Setting deterministic mode - this can have a performance impact")  
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.use_deterministic_algorithms(True)
+            if args.distributed.compile:
+                logger.warning("Disabling compile for deterministic mode")
+                args.distributed.compile = False
         setup_env(args.env)
         setup_torch_distributed(args.distributed)
         world_mesh = get_device_mesh(args.distributed)
@@ -300,15 +313,23 @@ def train(args: TrainArgs):
             args.data, dp_rank, dp_degree
         )
 
+        wandb_id = None
+        if args.logging.wandb is not None:
+            wandb_id = args.name + "_" + str(int(time.time()))
+
         train_state = TrainState(
             step=0,
             acc_step=0,
             data_loader_state=data_loader_state,
             scheduler=scheduler,
+            wandb_id=wandb_id,
         )
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
+        print("Setting wandb id to ", train_state.wandb_id) # if checkpoint existed, this will reload the id to continue the run
+        args.logging.wandb.id = train_state.wandb_id
+        
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
             if get_is_master():
@@ -541,6 +562,7 @@ def train(args: TrainArgs):
             ):
                 from apps.main.eval import (
                     launch_eval,
+                    run_eval,
                     EVAL_FOLDER_NAME,
                     EvalArgs,
                 )
@@ -558,22 +580,32 @@ def train(args: TrainArgs):
                 )
                 eval_args.metric_log_dir = args.dump_dir
                 if args.async_eval_gpus is None:
-                    launch_eval(eval_args)
+                    eval_results = launch_eval(eval_args)
+                    # eval_results = run_eval(eval_args, model, tokenizer)
+                    # model.train()
+                    if get_is_master():
+                        print(eval_results)
+                        metric_logger.log(eval_results, use_step=False)
                 elif get_is_master():
                     if wandb.run is not None and args.logging.wandb is not None:
-                        eval_args.wandb = deepcopy(args.logging.wandb)
+                        eval_wandb_args = deepcopy(args.logging.wandb)
+                        if eval_wandb_args.resume != "never":
+                            eval_wandb_args.resume = "must"
+                        eval_args.logging.wandb = eval_wandb_args
                     assert args.async_eval_gpus > 0
                     logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
+                    eval_slurm_args = deepcopy(args.slurm)
+                    eval_slurm_args.config = asdict(eval_args)
+                    eval_slurm_args.script = "apps.main.eval"
+                    eval_slurm_args.copy_code = False
+                    if args.async_eval_gpus > 8:
+                        eval_slurm_args.nodes = args.async_eval_gpus // 8
+                        eval_slurm_args.ngpu = 8
+                    else:
+                        eval_slurm_args.nodes = 1
+                        eval_slurm_args.ngpu = args.async_eval_gpus
                     with clean_env():
-                        launch_job(
-                            StoolArgs(
-                                asdict(eval_args),
-                                script="apps.main.eval",
-                                copy_code=False,
-                                nodes=args.async_eval_gpus // 8,
-                                qos="lowest",
-                            )
-                        )
+                        launch_job(eval_slurm_args)
 
             if preemption_flag["flag"]:
                 if not saved:
@@ -584,7 +616,6 @@ def train(args: TrainArgs):
                         args,
                         device_mesh=world_mesh,
                     )
-                requeue_slurm_job()
                 sys.exit(0)
 
     if not saved:
