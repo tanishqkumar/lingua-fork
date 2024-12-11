@@ -4,6 +4,8 @@ This fork contains some minimal changes necessary to get standard, simple config
 
 For documentation of lingua, see [the original lingua repo](https://github.com/facebookresearch/lingua)
 
+Credit for most of the changes to stool and async eval go to Yangjun.
+
 ## Quickstart
 
 First, symlink the data dir to the shared cluster data directory
@@ -77,7 +79,7 @@ export CONFIG_FILE=apps/main/configs/llama_1B_48Gx4-32acc.yaml
 sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/preemptible_4.slurm
 ```
 
-Finally, miso should be able to train a 7B model as well - a chinchilla optimal model takes 9.5 days on 8 GPUs.on 24 GPUs.
+Finally, miso should be able to train a 7B model as well - a chinchilla optimal model takes 9.5 days on 8 GPUs and 3+ days on 24 GPUs.
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_7B_8H200.yaml
 sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm
@@ -106,4 +108,5 @@ Be careful not to checkpoint too often on the fast SSDs since you will fill the 
 - Added sbatch scripts and setup that works without stool
 - Traps SIGTERM in addition to SIGUSR2 since the stanford SLURM config does not send user signals on preemption
 - Modifications to the async eval script to work with the cluster, and also to fix bugs in `stool.py`, `eval.py` and `distributed.py`
+  - Fixed checkpointing to wait for eval to complete - this means disk usage may be higher than the `keep` parameter.
 - Added a deterministic mode, and verified deterministic training when the flag is on. Also verified that the model can be loaded from a checkpoint and continue exactly
