@@ -149,6 +149,7 @@ class CheckpointManager:
         logger.info(f"All eval folders: {all_eval_folders}")
         logger.info(f"Other folders: {other_folders}")
 
+        keep_with_incompletes = set()
         if self.dump_every.keep > 0:
             dump_folders = dump_folders[-self.dump_every.keep :]
         if self.eval_every.keep > 0:

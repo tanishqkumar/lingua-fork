@@ -223,6 +223,7 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
 
 def train(args: TrainArgs):
     with ExitStack() as context_stack:
+        saved = False # set saved at start, since a SIGTERM can happen at any point
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
             args,
