@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH --account=miso
-#SBATCH --job-name=LM24gpu
-#SBATCH --nodes=3
-#SBATCH --ntasks=3
+#SBATCH --job-name=LM16gpu
+#SBATCH --nodes=2
+#SBATCH --ntasks=2
 #SBATCH --gpus-per-task=8
 #SBATCH --cpus-per-task=160
 #SBATCH --mem=2438G
@@ -16,16 +16,6 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --propagate=NONE
 
-# Mimic the effect of "conda init", which doesn't work for scripts
-eval "$($CONDA_PATH shell.bash hook)"
-source activate $CONDA_ENV_PATH
-# Parse the dump_dir and set it dynamically.
-if [[ -z "$DUMP_DIR" ]]; then
-    export OUT_PATH=$(grep '^[[:space:]]*dump_dir:' $CONFIG_FILE | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-    export DUMP_DIR=$BASE_DIR/$OUT_PATH
-fi
-
-mkdir -p $DUMP_DIR
 
 # Multinode env vars we need
 nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
@@ -38,7 +28,19 @@ echo Node IP: $head_node_ip
 echo Head Node: $head_node
 echo Node list: $nodes
 
+
+# Mimic the effect of "conda init", which doesn't work for scripts
+eval "$($CONDA_PATH shell.bash hook)"
+source activate $CONDA_ENV_PATH
+# Parse the dump_dir and set it dynamically.
+if [[ -z "$DUMP_DIR" ]]; then
+    export OUT_PATH=$(grep '^[[:space:]]*dump_dir:' $CONFIG_FILE | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    export DUMP_DIR=$BASE_DIR/$OUT_PATH
+fi
+
+mkdir -p $DUMP_DIR
+
 export OMP_NUM_THREADS=18
 export LAUNCH_WITH="SBATCH"
 
-srun -o $DUMP_DIR/log.out -e $DUMP_DIR/log.err -n 1 -N 1 torchrun --nnodes 3 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
+srun -o $DUMP_DIR/log.out -e $DUMP_DIR/log.err -n 1 -N 1 torchrun --nnodes 2 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
