@@ -41,4 +41,4 @@ echo Node list: $nodes
 export OMP_NUM_THREADS=18
 export LAUNCH_WITH="SBATCH"
 
-srun -o $DUMP_DIR/log.out -e $DUMP_DIR/log.err -n 1 -N 1 torchrun --nnodes 3 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
+srun -o $DUMP_DIR/log.out -e $DUMP_DIR/log.err torchrun --nnodes 3 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
