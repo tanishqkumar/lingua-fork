@@ -1,8 +1,8 @@
 #python -m lingua.stool config=apps/main/configs/llama2_7B.yaml nodes=32 account=fair_amaia_cw_codegen qos=lowest
 # dump_dir: !!!CHANGE_THIS!!!
-dump_dir: out/llama_7B_8H200
+dump_base: out
 name: "llama_7B_8H200"
-steps: 100_000 # chinchilla optimal is roughly 2_136_230 steps
+steps: 6000 # chinchilla optimal is roughly 2_136_230 steps
 grad_acc_steps: 1
 probe_freq: null
 
@@ -46,19 +46,17 @@ data:
     path: /juice5/scr5/nlp/data/huggingface/lingua-data/llama_tokenizer/original/tokenizer.model
 
 profiling:
-  run: true
-  mem_warmup: 0
-  mem_steps: 4
-  profile_warmup: 100
-  profile_steps: 4
+  run: false
 
 checkpoint:
   dump:
-    every: 10000
+    every: 500
     keep: 1
   eval:
-    every: 10000
+    every: 1000
     keep: 1
+  async_save_mode: "shm"
+  async_cleanup: true
 
 logging:
   freq: 1
@@ -100,7 +98,7 @@ eval:
 
 slurm:
   account: nlp
-  partition: jag-standard
+  partition: sphinx
   ngpu: 1
   ncpu: 16
   constraint: "[80G|141G]"

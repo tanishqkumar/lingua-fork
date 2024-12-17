@@ -706,6 +706,7 @@ def train(args: TrainArgs):
                 )
 
             if preemption_flag["flag"]:
+                checkpoint.wipe_shm() # terminate any async save processes and remove shm folders
                 if not saved:
                     checkpoint.save(
                         model,
@@ -713,6 +714,7 @@ def train(args: TrainArgs):
                         train_state,
                         args,
                         device_mesh=world_mesh,
+                        force_sync_save=True,
                     )
                 sys.exit(0)
 
@@ -723,6 +725,7 @@ def train(args: TrainArgs):
             train_state,
             args,
             device_mesh=world_mesh,
+            force_sync_save=True,
         )
         launch_eval(
             args,

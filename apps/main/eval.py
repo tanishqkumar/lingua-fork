@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
@@ -346,7 +347,17 @@ def main():
         metric_logger = stack.enter_context(
             MetricLogger(Path(cfg.dump_dir) / "metrics.jsonl", cfg)
         )
-        # loop over the ckpt_dir and make sure that we have 
+        # loop over the ckpt_dir and make sure that we have all the ckpt_{rank}.complete files
+        ckpt_dir = Path(cfg.ckpt_dir)
+        # get world size by looking for the number of train_state_*.json files
+        world_size = len([f for f in ckpt_dir.glob("train_state_*.json")])
+        # wait until all the ckpt_{rank}.complete files are present
+        while True:
+            if all((ckpt_dir / f"ckpt_{rank}.complete").exists() for rank in range(world_size)):
+                break
+            logger.info(f"Waiting for ckpt.complete files to be present")
+            time.sleep(1)
+        # If we have all the ckpt_{rank}.complete files, then we can proceed with evaluation
         eval_results = launch_eval(cfg)
         if get_global_rank() == 0:
             metric_logger.log(eval_results, use_step=False)

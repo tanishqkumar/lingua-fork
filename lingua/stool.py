@@ -215,7 +215,7 @@ def launch_job(args: StoolArgs):
         f.write(sbatch)
 
     print("Submitting job ...")
-    os.system(f"{args.launcher} {dump_dir}/submit.slurm")
+    subprocess.Popen([args.launcher, f"{dump_dir}/submit.slurm"])
 
     print("Done.")
 

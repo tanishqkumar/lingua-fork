@@ -6,10 +6,13 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+import time
 from typing import Callable, List, Optional, Tuple
 
+import shutil
 import torch
 import torch.distributed as dist
+from copy import deepcopy
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import FileSystemReader
 import torch.nn as nn
@@ -29,6 +32,7 @@ from torch.distributed.checkpoint.format_utils import (
     dcp_to_torch_save,
 )
 import torch.optim.optimizer
+from multiprocessing import Process
 
 from lingua.distributed import get_is_master
 
@@ -60,6 +64,11 @@ class CheckpointArgs:
     path: Optional[str] = None
     init_ckpt_path: Optional[str] = None
     continue_training_from_init: bool = False
+    # "shm" or "None". shm uses /dev/shm as a fast checkpoint target and async copies to the ckpt path. None is the usual sync setup, which is safe but slow.
+    async_save_mode: Optional[str] = None
+    async_cleanup: bool = False  # New field to control async cleanup
+    thread_debug: bool = True # Enables debug print statements within save / cleanup threads.
+    
 
 
 def _get_key_step(name: str):
@@ -108,10 +117,25 @@ class CheckpointManager:
         self.eval_every = args.eval
         self.init_ckpt_path = args.init_ckpt_path
         self.continue_training_from_init = args.continue_training_from_init
-
+        self.async_save_mode = args.async_save_mode
+        self.async_cleanup = args.async_cleanup
+        self.thread_debug = args.thread_debug
         assert os.path.exists(self.path), f"Path {self.path} does not exist and needs to be created before using CheckpointManager (use instantiate_and_make_dir)"
 
         self.existing_saves = self.get_existing_saves()
+        # used for async saving
+        self._shm_save_hash = hex(hash(str(time.time()+dist.get_rank())))[-8:]
+        self._save_process = None
+        self._cleanup_process = None
+
+    def __getstate__(self):
+        # capture what is normally pickled
+        state = self.__dict__.copy()
+
+        # remove unpicklable/problematic variables 
+        state['_save_process'] = None
+        state['_cleanup_process'] = None
+        return state
 
     def get_existing_saves(self) -> List[Path]:
         folders = [
@@ -122,7 +146,32 @@ class CheckpointManager:
         folders.sort(key=lambda p: _get_key_step(p.name))
         return folders
 
+    def remove_folders(self, folders_to_remove: Tuple[str], rank: int):
+        """Process target for folder removal"""
+        if self.thread_debug:
+            print(f"Rank {rank} starting cleanup of {len(folders_to_remove)} folders")
+        for folder_str in folders_to_remove:
+            folder = Path(folder_str)
+            for file in folder.iterdir():
+                if file.is_file():
+                    file.unlink()
+                elif file.is_dir():
+                    assert file.name in [CONSOLIDATE_FOLDER]
+                    for f in file.iterdir():
+                        f.unlink()
+                    file.rmdir()
+            folder.rmdir()
+        if self.thread_debug:
+            print(f"Completed cleanup")
+
     def clean_up(self):
+        # Wait for any previous cleanup to complete
+        if self.async_cleanup and self._cleanup_process is not None:
+            logger.info(f"Rank {dist.get_rank()} waiting for previous cleanup to complete...")
+            self._cleanup_process.join()
+            self._cleanup_process = None
+        dist.barrier()
+
         logger.info("Cleaning up checkpoints...")
         dump_folders = []
         eval_complete_folders = []
@@ -164,17 +213,17 @@ class CheckpointManager:
 
         logger.info(f"Removing folders: {folder_to_remove}")
 
-        if dist.get_rank() == 0:
-            for folder in folder_to_remove:
-                for file in folder.iterdir():
-                    if file.is_file():
-                        file.unlink()
-                    elif file.is_dir():
-                        assert file.name in [CONSOLIDATE_FOLDER]
-                        for f in file.iterdir():
-                            f.unlink()
-                        file.rmdir()
-                folder.rmdir()
+        if dist.get_rank() == 0 and len(folder_to_remove) > 0:
+            str_folders_to_remove = tuple([str(folder) for folder in folder_to_remove])
+            print(f"Removing folders: {str_folders_to_remove}")
+            if self.async_cleanup:
+                self._cleanup_process = Process(
+                    target=self.remove_folders,
+                    args=(str_folders_to_remove, dist.get_rank())
+                )
+                self._cleanup_process.start()
+            else:
+                self.remove_folders(str_folders_to_remove, dist.get_rank())
 
         dist.barrier()
 
@@ -212,39 +261,56 @@ class CheckpointManager:
         return dp_rank, tp_rank
 
     @torch.no_grad()
-    def get_state_dict(
-        self,
-        model,
-        optimizer,
-    ):
+    def get_state_dict(self, model, optimizer):
         model_sd, optim_sd = get_state_dict(model, optimizer)
         return {"model": model_sd, "optim": optim_sd}
 
-    def save(
-        self,
-        model,
-        optimizer,
-        train_state,
-        config,
-        device_mesh: Optional[DeviceMesh] = None,
-    ) -> bool:
+    def _async_shm_save(self, state_dict_path, rank, save_dir):
+        """Process target for async state dict saving"""
+        if self.thread_debug:
+            print(f"Rank {rank} saving state dict to {save_dir}")
+        # Copy checkpoint files from temp location to final save dir
+        for file in Path(state_dict_path).glob("*"):
+            shutil.move(file, Path(save_dir) / file.name)
+        # Clean up temp directory
+        shutil.rmtree(state_dict_path)
+        # Touch save_dir / ckpt_{rank}.complete to mark done
+        (Path(save_dir) / f"ckpt_{rank}.complete").touch()
+        if self.thread_debug:
+            print(f"Rank {rank} saved state dict to {save_dir}")
 
-        # When creating directory check if only rank0 or is there other solution
+    def save(self, model, optimizer, train_state, config, device_mesh: Optional[DeviceMesh] = None, force_sync_save: bool = False) -> bool:
+        # Wait for any previous save to complete if async
+        if self.async_save_mode is not None: 
+            if self._save_process is not None:
+                logger.info(f"Rank {dist.get_rank()} waiting for previous save to complete...")
+                self._save_process.join()
+        dist.barrier()  # Ensure all ranks are ready to start new save
+        
+        # Create save directory and get state dict
         path = Path(self.path)
         curr_save_dir = self._create_folder(path, FOLDER_NAME.format(train_state.step))
         logger.info(f"Saving to: {str(curr_save_dir)}")
 
-        if dist.is_initialized():
-            dist.barrier()
-
-        logger.info("Saving...")
         state_dict = self.get_state_dict(model, optimizer)
-        dcp.save(state_dict, checkpoint_id=curr_save_dir)
-        logger.info("State dict saved!")
 
-        if dist.is_initialized():
-            dist.barrier()
+        if self.async_save_mode == "shm" and (not force_sync_save):
+            # Launch async save
+            ckpt_path = Path('/dev/shm/')
+            tmp_folder = f"{self._shm_save_hash}"
+            ckpt_tmp_dir = self._create_folder(ckpt_path, tmp_folder)
+            dcp.save(state_dict, checkpoint_id=ckpt_tmp_dir)
+            self._save_process = Process(
+                target=self._async_shm_save,
+                args=(ckpt_tmp_dir, dist.get_rank(), curr_save_dir)
+            )
+            self._save_process.start()
+        else:
+            dcp.save(state_dict, checkpoint_id=curr_save_dir)
+            # Touch save_dir / ckpt_{rank}.complete to mark done
+            (Path(curr_save_dir) / f"ckpt_{dist.get_rank()}.complete").touch()
 
+        # Handle the rest synchronously since they're quick
         if get_is_master():
             with open(curr_save_dir / CONFIG_NAME, "w") as f:
                 json.dump(
@@ -252,19 +318,15 @@ class CheckpointManager:
                     f,
                 )
 
-        # Add json dump here
         dp_rank, tp_rank = self._get_dp_tp_mesh(device_mesh)
         if tp_rank == 0:
             train_state_name = TRAIN_STATE_NAME.format(dp_rank)
-            logger.info(
-                f"Saving train state to: {str(curr_save_dir / train_state_name)}"
-            )
+            logger.info(f"Saving train state to: {str(curr_save_dir / train_state_name)}")
             with open(curr_save_dir / train_state_name, "w") as f:
                 json.dump(train_state.state_dict(), f)
-            logger.info("Train state saved !")
+            logger.info("Train state saved!")
 
         self.existing_saves.append(curr_save_dir)
-
         self.clean_up()
 
         if dist.is_initialized():
@@ -321,3 +383,30 @@ class CheckpointManager:
         dist.barrier()
 
         return cls(args)
+    
+
+    def wipe_shm(self):
+        if self.async_save_mode == "shm":
+            if self._save_process is not None:
+                self._save_process.terminate()
+            shm_base = '/dev/shm'
+            if os.path.exists(shm_base):
+                for item in os.listdir(shm_base):
+                    if item.startswith(self._shm_save_hash):
+                        full_path = os.path.join(shm_base, item)
+                        if os.path.isdir(full_path):
+                            shutil.rmtree(full_path)
+                        else:
+                            os.remove(full_path)
+
+    
+    def __del__(self):
+        if self._save_process is not None:
+            self._save_process.join()
+        # clean up shm
+        if self.async_save_mode == "shm":
+            self.wipe_shm()
+        # Update destructor to also wait for cleanup
+        if self._cleanup_process is not None:
+            self._cleanup_process.join()
+        
