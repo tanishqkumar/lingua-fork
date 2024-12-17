@@ -17,12 +17,12 @@ Next, build the conda environment
 bash setup/create_env.sh
 ```
 
-Symlink the output directory to a fast shared storage device. Be sure to change the path to your own directory! Also, `/sphinx` requires a quota which you can get from contacting CS IT.
+Set up the output directory. Either use a fast devices like sphinx (Be sure to change the path to your own directory! Also, `/sphinx` requires a quota which you can get from contacting CS IT.)
 ```bash
 ln -sf /sphinx/u/thashim/lingua-checkpoints out
 ```
 
-*Warning slow!* Alternatively, make an output directory on juice.
+Alternatively, make an output directory on juice, but this is slow so you will need to checkpoint less often. You will want to use async checkpointing if you use this option - see notes below.
 ```bash
 mkdir -p out/
 ```
@@ -45,6 +45,12 @@ Note that CONDA_PATH and CONDA_ENV_PATH are used during async eval in `stool.py`
 Doing learning rate sweeps is straightforward using the option override features of lingua. An example is in `scripts/lr_sweep.sh`.
 ```bash
 scripts/lr_sweep.sh
+```
+
+Here's an example of how to run a chinchilla optimal model.
+```bash
+export CONFIG_FILE=apps/main/configs/llama_8H200_chinchilla.yaml
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE -t 1:00:00 apps/main/configs/miso_8.slurm  
 ```
 
 Since lingua does precise, full-state checkpointing, you can use preemptible GPUs if you want
@@ -99,7 +105,24 @@ Disk sizes needed for checkpoints from inspecting some runs
 | 7B | 85GB |
 | 1B | 40GB |
 
-Be careful not to checkpoint too often on the fast SSDs since you will fill the quota and crash.
+This means your output directory will fill up very quickly. Async checkpointing + use of juice5 can help. You can turn this option on in the checkpointing config part as
+```yaml
+checkpoint:
+  dump:
+    every: 500
+    keep: 1
+  eval:
+    every: 1000
+    keep: 1
+  async_save_mode: "shm"
+  async_cleanup: true
+```
+The "shm" save mode works in the following way: the system will first checkpoint to `/dev/shm` which is a fast, memory-backed filesystem. Then, it will use a second thread to copy the checkpoint to the actual output directory (which is slower) and then clean up after itself when its done. `async_cleanup` handles the logic to delete old, stale checkpoints from juice - this can sometimes take a while, so it gets offloaded onto its own thread.  
+
+Any eval jobs that rely on checkpoints will wait until the sentinel files `checkpoint_{}.done` are present, since its no longer the case that checkpoints are always present in the output directory. 
+
+Use of async checkpointing can have its own complications - the threads may sometimes not properly cleanup, and leave weird files in `/dev/shm` or crash due to lack of space on `shm`. Setting `async_save_mode: null` will disable this.
+
 
 
 # Changelog
