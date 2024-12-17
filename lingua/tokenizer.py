@@ -1,16 +1,18 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import abc
-from copy import copy
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional, Tuple
 import logging
 import os
+from copy import copy
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import List, Optional, Tuple
 
-from sentencepiece import SentencePieceProcessor
 import tiktoken
+from sentencepiece import SentencePieceProcessor
 from tiktoken.load import load_tiktoken_bpe
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,65 @@ class SentencePieceTokenizer(Tokenizer):
         return substrs, offsets
 
 
+class HuggingFaceTokenizer(Tokenizer):
+    def __init__(self, model_path: str) -> None:
+        if "llama" in model_path.lower():
+            tokenizer_kwargs = {
+                "use_fast": False,
+                "legacy": False,
+                "add_prefix_space": False,
+            }
+        else:
+            tokenizer_kwargs = {}
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+
+        # BOS / EOS token IDs
+        self.n_words: int = len(self.tokenizer)
+        self.bos_id: int = self.tokenizer.bos_token_id
+        self.eos_id: int = self.tokenizer.eos_token_id
+        self.pad_id: int = self.tokenizer.pad_token_id
+        self.special_tokens = self.tokenizer.special_tokens_map
+
+        logger.info(f"Loaded HuggingFace tokenizer from {model_path}")
+        logger.info(
+            f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id} - Special tokens: {self.special_tokens}"
+        )
+
+    def encode(self, s: str, add_bos: bool, add_eos: bool):
+        assert isinstance(s, str)
+        self.tokenizer.add_bos_token = add_bos
+        self.tokenizer.add_eos_token = add_eos
+        tokens = self.tokenizer.encode(s)
+        return tokens
+
+    def decode(self, tokens: List[int]):
+        return self.tokenizer.decode(tokens, spaces_between_special_tokens=False)
+
+    def get_token_offsets(
+        self, text: str, tokens: Optional[List[int]] = None
+    ) -> Tuple[List[str], List[int]]:
+        encoding = self.tokenizer(
+            text, return_offsets_mapping=True, add_bos=False, add_eos=False
+        )
+        offsets = [offset[0] for offset in encoding.offset_mapping]
+        substrs = [text[start:end] for start, end in encoding.offset_mapping]
+        return substrs, offsets
+
+    def add_special_tokens(self, special_tokens: Enum):
+        # Get all values from the enum members
+        special_tokens_list = [token.value for token in special_tokens]
+        special_tokens_dict = {"additional_special_tokens": special_tokens_list}
+        self.tokenizer.add_special_tokens(
+            special_tokens_dict, replace_additional_special_tokens=True
+        )
+
+        # update attributes
+        self.n_words = len(self.tokenizer)
+        self.special_tokens = self.tokenizer.special_tokens_map
+        return self
+
+
 DEFAULT_TIKTOKEN_PATTERN = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
 DEFAULT_TIKTOKEN_SPECIAL_TOKENS = {
     "<|begin_of_text|>": 0,
@@ -194,6 +255,8 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return MockTokenizer()
     elif name == "sp":
         return SentencePieceTokenizer(path)
+    elif name == "hf":
+        return HuggingFaceTokenizer(path)
     elif name == "tiktoken":
         return TikTokenTokenizer(path)
     else:
