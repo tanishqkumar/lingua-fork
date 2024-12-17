@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 import gc
+import json
 import logging
 import os
 import sys
@@ -12,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Any, Dict, List, Optional
+import hashlib
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -75,7 +77,8 @@ logger = logging.getLogger()
 @dataclass
 class TrainArgs:
     name: str = "lingua"
-    dump_dir: str = ""
+    dump_dir: Optional[str] = None
+    dump_base: Optional[str] = None
 
     seed: int = 42
     deterministic: bool = False
@@ -87,8 +90,9 @@ class TrainArgs:
     gc_collect_freq: int = 1000
     probe_freq: Optional[int] = None
 
-    # Nb optimizer steps to take
-    steps: int = 1000
+    # Nb optimizer steps to take. If none, compute it from the total flops
+    steps: Optional[int] = None
+    total_flops: Optional[float] = None 
 
     data: DataArgs = field(default_factory=DataArgs)
     optim: OptimArgs = field(default_factory=OptimArgs)
@@ -130,7 +134,52 @@ class TrainState(Stateful):
         self.scheduler.load_state_dict(state_dict["scheduler"])
         self.wandb_id = state_dict["wandb_id"]
 
+
+def deepmind_flops_per_sequence(n_layers, n_heads, d_model, n_ctx, n_vocab, ff_ratio=4):
+    """DeepMind method for forwad pass FLOPs counting of decoder-only Transformer
+    from https://www.adamcasson.com/posts/transformer-flops
+    returns forward + backward FLOPs which is 3 times the forward FLOPs
+    """
+    d_attn = d_model // n_heads
+    d_ff = d_model * ff_ratio
+ 
+    embeddings = 2 * n_ctx * n_vocab * d_model
+ 
+    attn_qkv = 2 * n_ctx * 3 * d_model * (d_attn * n_heads)
+    attn_logits = 2 * n_ctx * n_ctx * (d_attn * n_heads)
+    attn_softmax = 3 * n_heads * n_ctx * n_ctx
+    attn_reduce = 2 * n_ctx * n_ctx * (d_attn * n_heads)
+    attn_project = 2 * n_ctx * (d_attn * n_heads) * d_model
+    total_attn = attn_qkv + attn_logits + attn_softmax + attn_reduce + attn_project
+ 
+    ff = 2 * n_ctx * (d_model * d_ff + d_model * d_ff)
+ 
+    logits = 2 * n_ctx * d_model * n_vocab
+
+    forward_flops = embeddings + n_layers * (total_attn + ff) + logits
+ 
+    return 3 * forward_flops 
+
+
+def validate_dump_dir(args: TrainArgs):
+    # either we have explicit dump_dir, or we have a dump_base + name
+    assert args.dump_dir or (args.dump_base and args.name), "Must set either dump_dir OR dump_base + name"
+    if not args.dump_dir:
+        # Get git sha and hash of current diff
+        try:
+            import subprocess
+            git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+            #git_diff = subprocess.check_output(['git', 'diff']).decode('ascii')
+            #diff_hash = hashlib.sha256(git_diff.encode()).hexdigest()[:8]
+            #args.name = f"{args.name}_{git_sha[:8]}_{diff_hash}"
+            args.name = f"{args.name}_{git_sha[:8]}"
+        except:
+            logger.warning("Could not get git info")
+        args.dump_dir = str(Path(args.dump_base) / f"{args.name}")
+
+
 def validate_train_args(args: TrainArgs, output_size: int):
+
     if args.model.vocab_size < 0:
         logger.info(f"Setting model output size to {args.model.vocab_size}")
         args.model.vocab_size = output_size
@@ -138,7 +187,35 @@ def validate_train_args(args: TrainArgs, output_size: int):
         args.model.vocab_size == output_size
     ), "Vocab size should be the same as output size"
 
-    assert args.dump_dir, "Dump dir not set"
+    num_gpus = args.distributed.dp_replicate * args.distributed.dp_shard
+    if args.steps is None:
+        if args.total_flops is None:
+            raise ValueError("Either steps or total_flops must be set")
+        else:
+            logger.info(f"Total flops: {args.total_flops}")
+            num_sequences = args.total_flops / deepmind_flops_per_sequence(
+                args.model.n_layers,
+                args.model.n_heads,
+                args.model.dim,
+                args.data.seq_len,
+                args.model.vocab_size,
+            )
+            args.steps = int(num_sequences / (args.data.batch_size * args.grad_acc_steps * num_gpus))
+            logger.info(f"Total tokens: {num_sequences * args.data.seq_len}")
+            logger.info(f"Setting steps to {args.steps}")
+    else:
+        seq_per_step = args.data.batch_size * args.grad_acc_steps * num_gpus
+        args.total_flops = deepmind_flops_per_sequence(
+            args.model.n_layers,
+            args.model.n_heads,
+            args.model.dim,
+            args.data.seq_len,
+            args.model.vocab_size,
+        ) * args.steps * seq_per_step
+        logger.info(f"Total flops: {args.total_flops}")
+        logger.info(f"Total tokens: {args.steps * seq_per_step * args.data.seq_len}")
+
+    assert (args.model.dim % args.model.n_heads == 0) and (bin(args.model.dim // args.model.n_heads).count('1') == 1), "model.dim / model.n_heads must be a power of 2 for eval which uses flex attention"
 
     if args.checkpoint.path is None:
         logger.info(f"Setting checkpoint path to {args.checkpoint.path}")
@@ -221,18 +298,67 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
     return test
 
 
+def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: CheckpointManager, metric_logger: MetricLogger):
+    from apps.main.eval import (
+        launch_eval,
+        run_eval,
+        EVAL_FOLDER_NAME,
+        EvalArgs,
+    )
+    eval_args = dataclass_from_dict(EvalArgs, args.eval)
+
+    eval_args.global_step = train_state.step
+    eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
+    eval_args.dump_dir = str(
+        os.path.join(
+            args.dump_dir,
+            "evals",
+            EVAL_FOLDER_NAME.format(train_state.step),
+        )
+    )
+    eval_args.metric_log_dir = args.dump_dir
+    if args.async_eval_gpus is None:
+        eval_results = launch_eval(eval_args)
+        # eval_results = run_eval(eval_args, model, tokenizer)
+        # model.train()
+        if get_is_master():
+            print(eval_results)
+            metric_logger.log(eval_results, use_step=False)
+    elif get_is_master():
+        if wandb.run is not None and args.logging.wandb is not None:
+            eval_wandb_args = deepcopy(args.logging.wandb)
+            if eval_wandb_args.resume != "never":
+                eval_wandb_args.resume = "must"
+            eval_args.logging.wandb = eval_wandb_args
+        assert args.async_eval_gpus > 0
+        logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
+        eval_slurm_args = deepcopy(args.slurm)
+        eval_slurm_args.config = asdict(eval_args)
+        eval_slurm_args.script = "apps.main.eval"
+        eval_slurm_args.copy_code = False
+        if args.async_eval_gpus > 8:
+            eval_slurm_args.nodes = args.async_eval_gpus // 8
+            eval_slurm_args.ngpu = 8
+        else:
+            eval_slurm_args.nodes = 1
+            eval_slurm_args.ngpu = args.async_eval_gpus
+        with clean_env():
+            launch_job(eval_slurm_args)
+
+
 def train(args: TrainArgs):
     with ExitStack() as context_stack:
+        validate_dump_dir(args)
+        if get_is_master():
+            os.makedirs(args.dump_dir, exist_ok=True)
+            dump_config(args, Path(args.dump_dir) / "config.yaml")
+        init_logger(Path(args.dump_dir) / "train.log")
         saved = False # set saved at start, since a SIGTERM can happen at any point
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
             args,
             tokenizer.n_words,
         )
-        if get_is_master():
-            os.makedirs(args.dump_dir, exist_ok=True)
-            dump_config(args, Path(args.dump_dir) / "config.yaml")
-        init_logger(Path(args.dump_dir) / "train.log")
         init_signal_handler(set_preemption_flag)  # For handling preemption signals.
         if args.deterministic:
             logger.warning("Setting deterministic mode - this can have a performance impact")  
@@ -363,6 +489,7 @@ def train(args: TrainArgs):
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
 
+        train_start_time = time.time()
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
@@ -502,6 +629,11 @@ def train(args: TrainArgs):
                     )
                     * wps
                 )
+                H200_FLOPS = 989e12 # 'book flops' for H200
+                H200_MFU = FLOPS / H200_FLOPS
+                elapsed_time = time.time() - train_start_time
+                total_time_estimate = elapsed_time / train_state.step * args.steps
+                eta_estimate = total_time_estimate - elapsed_time
                 metrics = flatten_dict(
                     {
                         "global_step": train_state.step,
@@ -509,6 +641,7 @@ def train(args: TrainArgs):
                         "speed": {
                             "wps": wps,
                             "FLOPS": FLOPS,
+                            "H200_MFU": H200_MFU,
                             "curr_iter_time": curr_iter_time,
                             "data_load_time": data_load_time,
                         },
@@ -516,6 +649,10 @@ def train(args: TrainArgs):
                             "grad_norm": grad_norm,
                             "lr": curr_lr,
                             "total_tokens": total_tokens,
+                        },
+                        "time": {
+                            "total_time_estimate": total_time_estimate,
+                            "eta_estimate": eta_estimate,
                         },
                         "memory": gpu_mem_stats._asdict(),
                     },
@@ -561,52 +698,12 @@ def train(args: TrainArgs):
             if args.eval is not None and every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
             ):
-                from apps.main.eval import (
-                    launch_eval,
-                    run_eval,
-                    EVAL_FOLDER_NAME,
-                    EvalArgs,
+                launch_eval(
+                    args,
+                    train_state,
+                    checkpoint,
+                    metric_logger,
                 )
-
-                eval_args = dataclass_from_dict(EvalArgs, args.eval)
-
-                eval_args.global_step = train_state.step
-                eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
-                eval_args.dump_dir = str(
-                    os.path.join(
-                        args.dump_dir,
-                        "evals",
-                        EVAL_FOLDER_NAME.format(train_state.step),
-                    )
-                )
-                eval_args.metric_log_dir = args.dump_dir
-                if args.async_eval_gpus is None:
-                    eval_results = launch_eval(eval_args)
-                    # eval_results = run_eval(eval_args, model, tokenizer)
-                    # model.train()
-                    if get_is_master():
-                        print(eval_results)
-                        metric_logger.log(eval_results, use_step=False)
-                elif get_is_master():
-                    if wandb.run is not None and args.logging.wandb is not None:
-                        eval_wandb_args = deepcopy(args.logging.wandb)
-                        if eval_wandb_args.resume != "never":
-                            eval_wandb_args.resume = "must"
-                        eval_args.logging.wandb = eval_wandb_args
-                    assert args.async_eval_gpus > 0
-                    logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
-                    eval_slurm_args = deepcopy(args.slurm)
-                    eval_slurm_args.config = asdict(eval_args)
-                    eval_slurm_args.script = "apps.main.eval"
-                    eval_slurm_args.copy_code = False
-                    if args.async_eval_gpus > 8:
-                        eval_slurm_args.nodes = args.async_eval_gpus // 8
-                        eval_slurm_args.ngpu = 8
-                    else:
-                        eval_slurm_args.nodes = 1
-                        eval_slurm_args.ngpu = args.async_eval_gpus
-                    with clean_env():
-                        launch_job(eval_slurm_args)
 
             if preemption_flag["flag"]:
                 if not saved:
@@ -626,6 +723,12 @@ def train(args: TrainArgs):
             train_state,
             args,
             device_mesh=world_mesh,
+        )
+        launch_eval(
+            args,
+            train_state,
+            checkpoint,
+            metric_logger,
         )
     gc.collect()
 
