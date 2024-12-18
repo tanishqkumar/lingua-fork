@@ -4,3 +4,4 @@
 slurm-*.out
 wandb
 out
+data/
