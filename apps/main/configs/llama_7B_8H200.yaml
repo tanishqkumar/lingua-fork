@@ -95,13 +95,15 @@ eval:
   generator:
     max_tokens: 8192
     dtype: bf16
+    show_progress: true
+    reduce_generation_overhead: true
 
 slurm:
   account: nlp
-  partition: sphinx
+  partition: jag-standard
   ngpu: 1
   ncpu: 16
-  constraint: "[80G|141G]"
+  constraint: "[48G|80G|141G]"
   mem: 128G
   anaconda: lingua_241127
   time: 1440  # 24 hours

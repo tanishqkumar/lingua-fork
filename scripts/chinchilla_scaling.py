@@ -11,8 +11,8 @@ config_file = "apps/main/configs/llama_8H200_chinchilla.yaml"
 email = "thashim@stanford.edu"
 
 # Learning rates to sweep
-learning_rates = ["5e-3", "1e-3", "5e-4", "1e-4"] # LRs taken rougly from https://huggingface.co/EleutherAI/pythia-6.9b
-model_depths = [24, 16, 8, 4]
+learning_rates = ["3e-3", "1e-3", "5e-4"] # LRs taken rougly from https://huggingface.co/EleutherAI/pythia-6.9b
+model_depths = [24, 16, 12, 8, 4]
 model_aspect = 96 # 96 dim per depth https://arxiv.org/pdf/2001.08361. we dont worry about powers of two stuff since we'll torch compile it and it'll pad out the matrices..
 model_head_dim = 32 # same cite as above.
 replicate_count = 2
@@ -24,7 +24,7 @@ flop_target = "26.205e18" # 2 hours.
 for replicate in range(replicate_count):    
     for lr in learning_rates:
         for depth in model_depths:
-            batch_target = int(16 * (24 / depth))
+            batch_target = 16
             # Modify the dump directory to include the learning rate
             extra_args = (f"name=llama_8H200_chinchilla_flops_{flop_target}_lr{lr}_depth{depth}_replicate{replicate} "
                  f"optim.lr={lr} "

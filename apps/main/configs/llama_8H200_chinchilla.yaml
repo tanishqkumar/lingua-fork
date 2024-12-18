@@ -52,6 +52,8 @@ checkpoint:
   eval:
     every: 500
     keep: 1
+  async_save_mode: "shm"
+  async_cleanup: true
 
 logging:
   freq: 1
@@ -80,6 +82,8 @@ eval:
   generator:
     max_tokens: 16384
     dtype: bf16
+    show_progress: true
+    reduce_generation_overhead: true
 
 # slurm is used for async eval
 slurm:

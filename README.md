@@ -127,6 +127,10 @@ Use of async checkpointing can have its own complications - the threads may some
 
 # Changelog
 
+12/17/2024
+- Added async checkpointing
+- Some chinchilla scaling recipes
+
 12/10/2024 (v0)
 - Added sbatch scripts and setup that works without stool
 - Traps SIGTERM in addition to SIGUSR2 since the stanford SLURM config does not send user signals on preemption

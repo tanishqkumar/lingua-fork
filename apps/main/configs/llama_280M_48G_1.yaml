@@ -1,5 +1,5 @@
 # dump_dir: !!!CHANGE_THIS!!!
-dump_dir: out/llama_280M_debug_1
+dump_base: out
 name: llama_280M_debug_1
 steps: 500  # chinchilla optimal - 1525879 steps w/ 2048 slen and bsz 8. 1.25 Billion params * 20 tokens
 probe_freq: null
