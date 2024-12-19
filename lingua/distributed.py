@@ -2,7 +2,6 @@
 
 import atexit
 import contextlib
-from itertools import chain
 import logging
 import multiprocessing as mp
 import os
@@ -15,25 +14,24 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from functools import lru_cache, partial, reduce
+from itertools import chain
 from typing import List, Optional, Tuple, Union
 
 import torch
-from torch.distributed import ReduceOp
-from torch.nn.parallel import DistributedDataParallel as DDP
+
+# for no recompute ops
 from torch import distributed as dist
-from torch.distributed._tensor import DTensor
+from torch.distributed import ReduceOp
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed._tensor import DTensor
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
-from torch.utils.checkpoint import (
-    create_selective_checkpoint_contexts,
-    CheckpointPolicy,
-)
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-
-# for no recompute ops
-import xformers.ops
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
+)
 
 from lingua.float8 import convert_linears_to_fp8
 
@@ -367,18 +365,37 @@ def clean_env():
         "WORLD_SIZE",
         "LOCAL_RANK",
         "LOCAL_WORLD_SIZE",
-        #"TORCHELASTIC_RUN_ID",
+        # "TORCHELASTIC_RUN_ID",
         "DORA_FORCE_DISTRIB",
-        "ROLE_WORLD_SIZE"
+        "ROLE_WORLD_SIZE",
     )
+    
+    # Store SLURM_CONF separately and remove it from the list of vars to clean
+    slurm_conf = os.environ.get("SLURM_CONF")
+
     cluster_env = {
         x: os.environ.pop(x)
         for x in os.environ
-        if x.startswith(
-            ("SLURM_", "SLURMD_", "SRUN_", "SBATCH_", "SUBMITIT_", "WANDB_", "TORCHELASTIC_")
+        if (
+            x.startswith(
+                (
+                    "SLURM_",
+                    "SLURMD_",
+                    "SRUN_",
+                    "SBATCH_",
+                    "SUBMITIT_",
+                    "WANDB_",
+                    "TORCHELASTIC_",
+                )
+            )
+            or x in distrib_names
         )
-        or x in distrib_names
+        and x != "SLURM_CONF"
     }
+
+    if slurm_conf is not None:
+        os.environ["SLURM_CONF"] = slurm_conf
+
     try:
         yield
     finally:
