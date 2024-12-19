@@ -6,29 +6,21 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import FileSystemReader
 import torch.nn as nn
+import torch.optim.optimizer
 from omegaconf import OmegaConf
 from torch.distributed._tensor import DeviceMesh
+from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
     get_model_state_dict,
-    get_optimizer_state_dict,
     get_state_dict,
     set_state_dict,
-    set_model_state_dict,
-    set_optimizer_state_dict,
 )
-from torch.distributed.checkpoint.format_utils import (
-    torch_save_to_dcp,
-    dcp_to_torch_save,
-)
-import torch.optim.optimizer
 
 from lingua.distributed import get_is_master
 
@@ -87,19 +79,30 @@ def consolidate_checkpoints(ckpt_dir: str):
         logger.info("Consolidated !")
     return consolidate_path
 
-def load_from_checkpoint(ckpt_dir: str, model: nn.Module, optimizer: Optional[torch.optim.Optimizer] = None, model_key: str = "model", optim_key: str = "optim"):
-    if not (Path(ckpt_dir) / '.metadata').exists():
-        raise ValueError(f"Please convert the checkpoint distcp format using `torch.distributed.checkpoint.format_utils.torch_save_to_dcp` before loading it")
-    
+
+def load_from_checkpoint(
+    ckpt_dir: str,
+    model: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    model_key: str = "model",
+    optim_key: str = "optim",
+):
+    if not (Path(ckpt_dir) / ".metadata").exists():
+        raise ValueError(
+            f"Please convert the checkpoint distcp format using `torch.distributed.checkpoint.format_utils.torch_save_to_dcp` before loading it"
+        )
+
     state_dict = {}
     if optimizer is not None:
         state_dict[model_key], state_dict[optim_key] = get_state_dict(model, optimizer)
     else:
         state_dict[model_key] = get_model_state_dict(model)
-        if model_key == "": # If only loading a model directly, the key should be empty
+        if model_key == "":  # If only loading a model directly, the key should be empty
             state_dict = state_dict.pop(model_key)
-    
+
     dcp.load(state_dict, checkpoint_id=ckpt_dir)
+    logger.info(f"Loaded state dict: {state_dict}")
+
 
 class CheckpointManager:
     def __init__(self, args: CheckpointArgs):
@@ -109,7 +112,9 @@ class CheckpointManager:
         self.init_ckpt_path = args.init_ckpt_path
         self.continue_training_from_init = args.continue_training_from_init
 
-        assert os.path.exists(self.path), f"Path {self.path} does not exist and needs to be created before using CheckpointManager (use instantiate_and_make_dir)"
+        assert os.path.exists(
+            self.path
+        ), f"Path {self.path} does not exist and needs to be created before using CheckpointManager (use instantiate_and_make_dir)"
 
         self.existing_saves = self.get_existing_saves()
 
@@ -134,7 +139,7 @@ class CheckpointManager:
             is_eval = _get_key_step(p.name) % self.eval_every.every == 0
             if is_dump:
                 dump_folders.append(p)
-            if is_eval: # wait for evals to complete before removing them!
+            if is_eval:  # wait for evals to complete before removing them!
                 if (p / "eval.complete").exists():
                     eval_complete_folders.append(p)
                 else:
@@ -153,11 +158,15 @@ class CheckpointManager:
         if self.dump_every.keep > 0:
             dump_folders = dump_folders[-self.dump_every.keep :]
         if self.eval_every.keep > 0:
-            eval_folders_to_keep = set(all_eval_folders[-self.eval_every.keep:])
-            keep_with_incompletes = set(eval_folders_to_keep) | set(eval_incomplete_folders)
-            if not eval_folders_to_keep.issubset(keep_with_incompletes): 
+            eval_folders_to_keep = set(all_eval_folders[-self.eval_every.keep :])
+            keep_with_incompletes = set(eval_folders_to_keep) | set(
+                eval_incomplete_folders
+            )
+            if not eval_folders_to_keep.issubset(keep_with_incompletes):
                 diff = eval_folders_to_keep - keep_with_incompletes
-                logger.warning(f"WARNING: Attempted to clean up eval folders, but some are not yet complete. Disk usage may be higher than expected. Incomplete folders: {diff}")
+                logger.warning(
+                    f"WARNING: Attempted to clean up eval folders, but some are not yet complete. Disk usage may be higher than expected. Incomplete folders: {diff}"
+                )
 
         folder_to_keep = set(other_folders + dump_folders) | keep_with_incompletes
         folder_to_remove = set(self.existing_saves) - folder_to_keep
@@ -206,7 +215,9 @@ class CheckpointManager:
             if "dp_replicate" in device_mesh.mesh_dim_names:
                 dp_rank = device_mesh.get_local_rank("dp_replicate")
                 if "dp_shard" in device_mesh.mesh_dim_names:
-                    dp_rank = dp_rank * device_mesh["dp_replicate"].size() + device_mesh.get_local_rank("dp_shard")
+                    dp_rank = dp_rank * device_mesh[
+                        "dp_replicate"
+                    ].size() + device_mesh.get_local_rank("dp_shard")
             if "tp" in device_mesh.mesh_dim_names:
                 tp_rank = device_mesh.get_local_rank("tp")
         return dp_rank, tp_rank
@@ -313,7 +324,7 @@ class CheckpointManager:
             optim_state_dict=state_dict["optim"],
         )
         logger.info("Model and optim reloaded")
-    
+
     @classmethod
     def instantiate_and_make_dir(cls, args: CheckpointArgs):
         if get_is_master():

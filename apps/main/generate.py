@@ -1,17 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-import time
 from typing import List, Optional
 
 import torch
-from torch import nn
-from tqdm import tqdm
-
 from omegaconf import OmegaConf
+from torch import nn
 from torch.nn import functional as F
-import xformers
+from torch.nn.attention.flex_attention import create_block_mask
+from tqdm import tqdm
 
 from apps.main.transformer import LMTransformer, LMTransformerArgs
 from lingua.args import dataclass_from_dict
@@ -24,7 +23,6 @@ from lingua.transformer import (
     lengths_to_local_ids,
     lengths_to_start_ids,
 )
-from torch.nn.attention.flex_attention import create_block_mask
 
 
 def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
@@ -420,6 +418,10 @@ def load_consolidated_model_and_tokenizer(
     model = model.cuda().eval()
     for param in model.parameters():
         param.data = param.data.to(dtype=param_dtype)
+
+    # Init RoPE parameters
+    model.rope_embeddings.reset_parameters()
+
     return model, tokenizer, config
 
 

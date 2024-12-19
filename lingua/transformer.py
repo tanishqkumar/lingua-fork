@@ -1,18 +1,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
 from torch.nn import functional as F
-from xformers.ops import fmha, AttentionBias
 from torch.nn.attention.flex_attention import (
     BlockMask,
-    flex_attention,
     _mask_mod_signature,
+    flex_attention,
 )
+from xformers.ops import AttentionBias, fmha
 
 from lingua import probe
 
@@ -47,6 +48,8 @@ class BaseTransformerArgs:
 
     max_seqlen: int = 1024
 
+    rope_scaling: Optional[dict] = None
+
 
 def cross_entropy(pred, target, **kwargs):
     return F.nll_loss(
@@ -69,7 +72,40 @@ def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
     )
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def apply_rope_scaling(freqs: torch.Tensor, rope_scaling: Optional[dict] = None):
+    """Implementation due to gpt-fast team:
+    https://github.com/pytorch-labs/gpt-fast
+    """
+    factor = rope_scaling["factor"]
+    low_freq_factor = rope_scaling["low_freq_factor"]
+    high_freq_factor = rope_scaling["high_freq_factor"]
+    old_context_len = rope_scaling["original_max_position_embeddings"]
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_freqs = []
+    for freq in freqs:
+        wavelen = 2 * math.pi / freq
+        if wavelen < high_freq_wavelen:
+            new_freqs.append(freq)
+        elif wavelen > low_freq_wavelen:
+            new_freqs.append(freq / factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            new_freqs.append((1 - smooth) * freq / factor + smooth * freq)
+
+    return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
+def precompute_freqs_cis(
+    dim: int,
+    end: int,
+    theta: float = 10000.0,
+    rope_scaling: Optional[dict] = None,
+):
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
@@ -77,15 +113,22 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     and the end index 'end'. The 'theta' parameter scales the frequencies.
     The returned tensor contains complex values in complex64 data type.
 
+    We have adapted the implementation to support rope scaling, following gpt-fast.
+
     Args:
         dim (int): Dimension of the frequency tensor.
         end (int): End index for precomputing frequencies.
         theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+        rope_scaling (Optional[dict], optional): Scaling factor for rope. Defaults to None.     
+            Follows the gpt-fast implementation.
 
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    if rope_scaling is not None:
+        freqs = apply_rope_scaling(freqs, rope_scaling)
+
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
 
@@ -223,22 +266,35 @@ class RotaryEmbedding(torch.nn.Module):
     RotaryEmbedding Module
     """
 
-    def __init__(self, theta: float, head_dim: int, max_seqlen: int = 1024):
+    def __init__(
+        self,
+        theta: float,
+        head_dim: int,
+        max_seqlen: int = 1024,
+        rope_scaling: Optional[dict] = None,
+    ):
         super().__init__()
 
         self.theta = theta
         self.head_dim = head_dim
         self.max_seqlen = max_seqlen
+        self.rope_scaling = rope_scaling
 
+        # Initialize as empty here, because the RoPE scaling logic involves .item() calls. 
+        #   These are not supported on meta devices.
+        #   Then, in train.py, we will actually init the parameters.
         self.register_buffer(
             "freqs_cis",
-            precompute_freqs_cis(dim=head_dim, end=max_seqlen, theta=theta),
+            torch.empty((self.max_seqlen, self.head_dim // 2, 2, 2)),
             persistent=False,
         )
 
     def reset_parameters(self):
         self.freqs_cis[...] = precompute_freqs_cis(
-            dim=self.head_dim, end=self.max_seqlen, theta=self.theta
+            dim=self.head_dim,
+            end=self.max_seqlen,
+            theta=self.theta,   
+            rope_scaling=self.rope_scaling
         )
 
     def forward(
@@ -550,6 +606,7 @@ class BaseTransformer(nn.Module):
             theta=args.rope_theta,
             head_dim=args.head_dim or args.dim // args.n_heads,
             max_seqlen=args.max_seqlen,
+            rope_scaling=args.rope_scaling,
         )
 
         self.layers = nn.ModuleList()

@@ -1,28 +1,36 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-from copy import deepcopy
 import gc
 import logging
 import os
 import sys
 import time
 from contextlib import ExitStack
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import numpy as np
-from omegaconf import OmegaConf
 import torch
 import torch.distributed
-import torch.nn.functional as F
+import wandb
 import xformers.profiler
-from torch.optim import lr_scheduler
-from torch.distributed.checkpoint.stateful import Stateful
+from omegaconf import OmegaConf
 from torch.distributed._tensor import DTensor
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.optim import lr_scheduler
 
+from apps.cpt.cpt_ckpt_utils import is_llama_pretrained_ckpt
+from apps.main.transformer import (
+    LMTransformer,
+    LMTransformerArgs,
+    build_fsdp_grouping_plan,
+    get_no_recompute_ops,
+    get_num_flop_per_token,
+    tp_parallelize,
+)
 from lingua.args import dataclass_from_dict, dump_config, flatten_dict
 from lingua.checkpoint import CheckpointArgs, CheckpointManager, load_from_checkpoint
 from lingua.data import (
@@ -34,40 +42,24 @@ from lingua.data import (
 from lingua.distributed import (
     DistributedArgs,
     EnvironmentArgs,
-    init_signal_handler,
+    check_model_value_range,
+    clean_env,
     dist_mean_dict,
     get_device_mesh,
     get_is_master,
     get_world_size,
+    init_signal_handler,
     parallelize_model,
     setup_env,
     setup_torch_distributed,
-    clean_env,
-    requeue_slurm_job,
-    check_model_value_range,
 )
 from lingua.logger import init_logger
-from lingua.metrics import (
-    GPUMemoryMonitor,
-    LoggingArgs,
-    MetricLogger,
-    get_num_params,
-)
+from lingua.metrics import GPUMemoryMonitor, LoggingArgs, MetricLogger, get_num_params
 from lingua.optim import OptimArgs, build_optimizer
-from lingua.profiling import ProfilerArgs, maybe_run_profiler
-from lingua.tokenizer import build_tokenizer
-from apps.main.transformer import (
-    LMTransformerArgs,
-    LMTransformer,
-    get_num_flop_per_token,
-    build_fsdp_grouping_plan,
-    tp_parallelize,
-    get_no_recompute_ops,
-)
 from lingua.probe import AutoProbeD
+from lingua.profiling import ProfilerArgs, maybe_run_profiler
 from lingua.stool import StoolArgs, launch_job
-
-import wandb
+from lingua.tokenizer import build_tokenizer
 
 logger = logging.getLogger()
 
@@ -129,6 +121,7 @@ class TrainState(Stateful):
         self.data_loader_state = PackTokensState(**state_dict["data_loader_state"])
         self.scheduler.load_state_dict(state_dict["scheduler"])
         self.wandb_id = state_dict["wandb_id"]
+
 
 def validate_train_args(args: TrainArgs, output_size: int):
     if args.model.vocab_size < 0:
@@ -223,7 +216,7 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
 
 def train(args: TrainArgs):
     with ExitStack() as context_stack:
-        saved = False # set saved at start, since a SIGTERM can happen at any point
+        saved = False  # set saved at start, since a SIGTERM can happen at any point
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
             args,
@@ -235,7 +228,9 @@ def train(args: TrainArgs):
         init_logger(Path(args.dump_dir) / "train.log")
         init_signal_handler(set_preemption_flag)  # For handling preemption signals.
         if args.deterministic:
-            logger.warning("Setting deterministic mode - this can have a performance impact")  
+            logger.warning(
+                "Setting deterministic mode - this can have a performance impact"
+            )
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
@@ -289,12 +284,23 @@ def train(args: TrainArgs):
 
         if args.checkpoint.init_ckpt_path:
             logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
-            load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
-            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
+            load_from_checkpoint(
+                args.checkpoint.init_ckpt_path,
+                model,
+                model_key=(
+                    ""
+                    if is_llama_pretrained_ckpt(args.checkpoint.init_ckpt_path)
+                    else "model"
+                ),
+            )  # Put model_key="" if its directly the model checkpoint
         else:
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
+
+        # Need to initialize RoPE embeddings outside of the "meta" device context, since the RoPE scaling logic involves .item() calls, which are not supported on meta devices.
+        model.rope_embeddings.reset_parameters()
+
         check_model_value_range(model, range=10.0, std=1.0)
 
         # log model size
@@ -328,9 +334,11 @@ def train(args: TrainArgs):
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
-        print("Setting wandb id to ", train_state.wandb_id) # if checkpoint existed, this will reload the id to continue the run
+        print(
+            "Setting wandb id to ", train_state.wandb_id
+        )  # if checkpoint existed, this will reload the id to continue the run
         args.logging.wandb.id = train_state.wandb_id
-        
+
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
             if get_is_master():
@@ -562,10 +570,10 @@ def train(args: TrainArgs):
                 train_state, args.checkpoint.eval.every, acc_step=0
             ):
                 from apps.main.eval import (
-                    launch_eval,
-                    run_eval,
                     EVAL_FOLDER_NAME,
                     EvalArgs,
+                    launch_eval,
+                    run_eval,
                 )
 
                 eval_args = dataclass_from_dict(EvalArgs, args.eval)
