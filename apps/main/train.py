@@ -192,7 +192,7 @@ def validate_train_args(args: TrainArgs, output_size: int):
         if args.total_flops is None:
             raise ValueError("Either steps or total_flops must be set")
         else:
-            logger.info(f"Total flops: {args.total_flops}")
+            logger.info(f"Total flops: {args.total_flops:,}")
             num_sequences = args.total_flops / deepmind_flops_per_sequence(
                 args.model.n_layers,
                 args.model.n_heads,
@@ -201,8 +201,9 @@ def validate_train_args(args: TrainArgs, output_size: int):
                 args.model.vocab_size,
             )
             args.steps = int(num_sequences / (args.data.batch_size * args.grad_acc_steps * num_gpus))
-            logger.info(f"Total tokens: {num_sequences * args.data.seq_len}")
-            logger.info(f"Setting steps to {args.steps}")
+            args.tokens = num_sequences * args.data.seq_len
+            logger.info(f"Total tokens: {args.tokens:,}")
+            logger.info(f"Setting steps to {args.steps:,}")
     else:
         seq_per_step = args.data.batch_size * args.grad_acc_steps * num_gpus
         args.total_flops = deepmind_flops_per_sequence(
@@ -212,8 +213,9 @@ def validate_train_args(args: TrainArgs, output_size: int):
             args.data.seq_len,
             args.model.vocab_size,
         ) * args.steps * seq_per_step
-        logger.info(f"Total flops: {args.total_flops}")
-        logger.info(f"Total tokens: {args.steps * seq_per_step * args.data.seq_len}")
+        args.tokens = args.steps * seq_per_step * args.data.seq_len
+        logger.info(f"Total flops: {args.total_flops:,}")
+        logger.info(f"Total tokens: {args.tokens:,}")
 
     assert (args.model.dim % args.model.n_heads == 0) and (bin(args.model.dim // args.model.n_heads).count('1') == 1), "model.dim / model.n_heads must be a power of 2 for eval which uses flex attention"
 
@@ -496,9 +498,12 @@ def train(args: TrainArgs):
 
         train_start_time = time.time()
         nwords_since_last_log = 0
+        loss_for_logging = 0
         time_last_log = timer()
         gc.collect()
         while train_state.step < args.steps:
+            if train_state.acc_step == 0: # we just did a gradient update or started the training loop, so reset the accumulator
+                loss_for_logging = 0
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
@@ -573,8 +578,8 @@ def train(args: TrainArgs):
             loss = loss / args.grad_acc_steps
             # backward on scaled loss to create scaled gradients
             loss.backward()
-            # For logging we undo that scaling
-            loss = loss.detach() * args.grad_acc_steps
+            # track gradient accumulated loss for logging. when acc_step=1, we reset the accumulator since this is the first step.
+            loss_for_logging += loss.item()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=args.optim.clip, foreach=True
@@ -656,6 +661,7 @@ def train(args: TrainArgs):
                             "total_tokens": total_tokens,
                         },
                         "time": {
+                            "elapsed_time": elapsed_time,
                             "total_time_estimate": total_time_estimate,
                             "eta_estimate": eta_estimate,
                         },
@@ -665,7 +671,7 @@ def train(args: TrainArgs):
                 )
 
                 to_sync = {}
-                to_sync["loss/out"] = loss.item()
+                to_sync["loss/out"] = loss_for_logging
                 metrics.update(dist_mean_dict(to_sync))
 
                 if get_is_master():
@@ -677,7 +683,7 @@ def train(args: TrainArgs):
                 logger.info(
                     f"step: {train_state.step}"
                     f"  acc: {train_state.acc_step}"
-                    f"  loss: {round(loss.item(),4):>7}"
+                    f"  loss: {round(loss_for_logging,4):>7}"
                     f"  grad: {grad_norm:.2e}"
                     f"  flops: {FLOPS:.2e}"
                     f"  wps: {wps:.2e}"
