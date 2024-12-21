@@ -86,6 +86,7 @@ class EvalArgs:
     logging: LoggingArgs = field(default_factory=LoggingArgs)
 
     global_step: Optional[int] = None  # for in-training evaluation
+    terminal_eval_wandb: bool = False
 
 
 def all_dicts_same(dict_list):
@@ -253,6 +254,31 @@ def launch_eval(cfg: EvalArgs):
     return log_results
 
 
+def metrics_postprocessor(metrics, hide_stderr=False):
+    """
+    Simple way of postprocessing the eleuther metrics to be more readable / useful
+    """
+    metrics_output = metrics.copy()
+    for k, v in metrics.items():
+        # rename metrics that match eval/*stderr* into eval_stderr/
+        if k.startswith("eval/") and "stderr" in k:
+            if not hide_stderr: 
+                new_k = k.replace("eval/", "eval_stderr/")
+                metrics_output[new_k] = v
+            del metrics_output[k]  
+    # compute eval/overall_avg as the average of all eval/* metrics
+    # note - this averages over each metric, so it might double count tasks
+    overall_sum = 0
+    overall_count = 0
+    for k, v in metrics_output.items():
+        if k.startswith("eval/"):
+            overall_sum += v
+            overall_count += 1
+    overall_avg = overall_sum / overall_count
+    metrics_output["eval/overall_avg"] = overall_avg
+    return metrics_output
+
+
 def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
     
     Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
@@ -272,6 +298,7 @@ def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
         log_results = {k: {k2: v2 for k2, v2 in v.items() if k2 != "alias"} for k, v in log_results.items()}
         log_results = {"eval/" + m.replace(".", "/"): v for m, v in log_results.items()}
         log_results = flatten_dict(log_results)
+        log_results = metrics_postprocessor(log_results)
         if cfg.global_step is not None:
             log_results["global_step"] = cfg.global_step
         logger.info(f"All evaluation results: {log_results}")
@@ -360,7 +387,36 @@ def main():
         # If we have all the ckpt_{rank}.complete files, then we can proceed with evaluation
         eval_results = launch_eval(cfg)
         if get_global_rank() == 0:
-            metric_logger.log(eval_results, use_step=False)
+            if cfg.terminal_eval_wandb and cfg.metric_log_dir is not None:
+                # TODO: This code will not necessarily wait for all the eval runs to finish - we are relying on the last eval run to finish last, but this is not guaranteed
+                eval_results_all = []
+                with open(Path(cfg.metric_log_dir) / "metrics.eval.jsonl", "r") as f:
+                    for line in f:
+                        if line.strip():  # Skip empty lines
+                            eval_results_all.append(json.loads(line))
+                eval_results_all.append(eval_results)
+
+                # does a join on the eval and train metrics
+                metrics = []
+                with open(Path(cfg.metric_log_dir) / "metrics.jsonl", "r") as f:
+                    for line in f:
+                        if line.strip():  # Skip empty lines
+                            metrics.append(json.loads(line))
+                train_metrics_by_step = {m["global_step"]: m for m in metrics}
+                eval_metrics_by_step = {m["global_step"]: m for m in eval_results_all}
+                all_steps = set(train_metrics_by_step.keys()).union(set(eval_metrics_by_step.keys()))
+                all_steps = sorted(all_steps)
+                for step in all_steps:
+                    train_metrics = train_metrics_by_step.get(step)
+                    eval_metrics = eval_metrics_by_step.get(step)
+                    if train_metrics and eval_metrics:
+                        metric_logger.log(train_metrics | eval_metrics, use_step=False)
+                    elif train_metrics:
+                        metric_logger.log(train_metrics, use_step=False)
+                    elif eval_metrics:
+                        metric_logger.log(eval_metrics, use_step=False)
+            else:
+                metric_logger.log(eval_results, use_step=False)
             # Write sentinel file to mark eval completion
             eval_complete_path = Path(cfg.ckpt_dir) / "eval.complete"
             eval_complete_path.touch()

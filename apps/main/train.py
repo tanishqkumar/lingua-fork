@@ -270,6 +270,7 @@ def validate_train_args(args: TrainArgs, output_size: int):
     ), "Don't profile during probe step"
     if args.logging.wandb is not None:
         args.logging.wandb.name = args.name
+        args.logging.wandb.job_type = "train"
 
     if args.probe_freq is not None:
         assert (
@@ -298,7 +299,7 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
     return test
 
 
-def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: CheckpointManager, metric_logger: MetricLogger):
+def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: CheckpointManager, metric_logger: MetricLogger, upload_wandb: bool = False, terminal_eval_wandb: bool = False):
     from apps.main.eval import (
         launch_eval,
         run_eval,
@@ -325,11 +326,15 @@ def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: Checkpoint
             print(eval_results)
             metric_logger.log(eval_results, use_step=False)
     elif get_is_master():
-        if wandb.run is not None and args.logging.wandb is not None:
+        if upload_wandb and wandb.run is not None and args.logging.wandb is not None:
             eval_wandb_args = deepcopy(args.logging.wandb)
-            if eval_wandb_args.resume != "never":
-                eval_wandb_args.resume = "must"
+            eval_wandb_args.id = args.logging.wandb.id + "_eval"
+            eval_wandb_args.name = args.logging.wandb.name + "_eval"
+            eval_wandb_args.job_type = "eval"
             eval_args.logging.wandb = eval_wandb_args
+            if terminal_eval_wandb: # for terminal eval, never resume (this should be the only run, and pass this flag to the eval script so it knows to upload everything in the run)
+                eval_wandb_args.resume = "never"    
+                eval_args.terminal_eval_wandb = True
         assert args.async_eval_gpus > 0
         logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
         eval_slurm_args = deepcopy(args.slurm)
@@ -698,11 +703,14 @@ def train(args: TrainArgs):
             if args.eval is not None and every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
             ):
+                is_final_eval = train_state.step == args.steps
                 launch_eval(
                     args,
                     train_state,
                     checkpoint,
                     metric_logger,
+                    upload_wandb=is_final_eval,
+                    terminal_eval_wandb=is_final_eval,
                 )
 
             if preemption_flag["flag"]:
@@ -732,6 +740,8 @@ def train(args: TrainArgs):
             train_state,
             checkpoint,
             metric_logger,
+            upload_wandb=True,
+            terminal_eval_wandb=True,
         )
     gc.collect()
 
