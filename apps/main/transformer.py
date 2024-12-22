@@ -23,14 +23,6 @@ from lingua.transformer import (
     RMSNorm,
     cross_entropy,
 )
-# from lingua.transformer import (
-#     BaseTransformerArgs,
-#     cross_entropy
-# )
-# from lingua.transformer_debug import (
-#     BaseTransformer,
-#     RMSNorm,
-# )
 
 
 def create_causal_mask(seqlen, attn_impl, sliding_window):
