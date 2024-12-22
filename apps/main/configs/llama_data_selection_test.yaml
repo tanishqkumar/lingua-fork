@@ -31,6 +31,8 @@ data:
   root_dir: /juice5/scr5/nlp/data/huggingface/lingua-data/
   sources:
     fineweb_edu_10bt_shuffled: 100.0
+  source_filter_functions:
+    fineweb_edu_10bt_shuffled: rm_en.wikipedia
   batch_size: 1
   prefetch_size: 1024
   seq_len: 2048

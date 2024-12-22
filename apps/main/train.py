@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import gc
+import json
 import logging
 import os
 import sys
@@ -11,7 +12,8 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+import hashlib
 
 import torch
 import torch.distributed
@@ -67,7 +69,8 @@ logger = logging.getLogger()
 @dataclass
 class TrainArgs:
     name: str = "lingua"
-    dump_dir: str = ""
+    dump_dir: Optional[str] = None
+    dump_base: Optional[str] = None
 
     seed: int = 42
     deterministic: bool = False
@@ -79,8 +82,9 @@ class TrainArgs:
     gc_collect_freq: int = 1000
     probe_freq: Optional[int] = None
 
-    # Nb optimizer steps to take
-    steps: int = 1000
+    # Nb optimizer steps to take. If none, compute it from the total flops
+    steps: Optional[int] = None
+    total_flops: Optional[float] = None 
 
     data: DataArgs = field(default_factory=DataArgs)
     optim: OptimArgs = field(default_factory=OptimArgs)
@@ -123,7 +127,51 @@ class TrainState(Stateful):
         self.wandb_id = state_dict["wandb_id"]
 
 
+def deepmind_flops_per_sequence(n_layers, n_heads, d_model, n_ctx, n_vocab, ff_ratio=4):
+    """DeepMind method for forwad pass FLOPs counting of decoder-only Transformer
+    from https://www.adamcasson.com/posts/transformer-flops
+    returns forward + backward FLOPs which is 3 times the forward FLOPs
+    """
+    d_attn = d_model // n_heads
+    d_ff = d_model * ff_ratio
+ 
+    embeddings = 2 * n_ctx * n_vocab * d_model
+ 
+    attn_qkv = 2 * n_ctx * 3 * d_model * (d_attn * n_heads)
+    attn_logits = 2 * n_ctx * n_ctx * (d_attn * n_heads)
+    attn_softmax = 3 * n_heads * n_ctx * n_ctx
+    attn_reduce = 2 * n_ctx * n_ctx * (d_attn * n_heads)
+    attn_project = 2 * n_ctx * (d_attn * n_heads) * d_model
+    total_attn = attn_qkv + attn_logits + attn_softmax + attn_reduce + attn_project
+ 
+    ff = 2 * n_ctx * (d_model * d_ff + d_model * d_ff)
+ 
+    logits = 2 * n_ctx * d_model * n_vocab
+
+    forward_flops = embeddings + n_layers * (total_attn + ff) + logits
+ 
+    return 3 * forward_flops 
+
+
+def validate_dump_dir(args: TrainArgs):
+    # either we have explicit dump_dir, or we have a dump_base + name
+    assert args.dump_dir or (args.dump_base and args.name), "Must set either dump_dir OR dump_base + name"
+    if not args.dump_dir:
+        # Get git sha and hash of current diff
+        try:
+            import subprocess
+            git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+            #git_diff = subprocess.check_output(['git', 'diff']).decode('ascii')
+            #diff_hash = hashlib.sha256(git_diff.encode()).hexdigest()[:8]
+            #args.name = f"{args.name}_{git_sha[:8]}_{diff_hash}"
+            args.name = f"{args.name}_{git_sha[:8]}"
+        except:
+            logger.warning("Could not get git info")
+        args.dump_dir = str(Path(args.dump_base) / f"{args.name}")
+
+
 def validate_train_args(args: TrainArgs, output_size: int):
+
     if args.model.vocab_size < 0:
         logger.info(f"Setting model output size to {args.model.vocab_size}")
         args.model.vocab_size = output_size
@@ -131,7 +179,37 @@ def validate_train_args(args: TrainArgs, output_size: int):
         args.model.vocab_size == output_size
     ), "Vocab size should be the same as output size"
 
-    assert args.dump_dir, "Dump dir not set"
+    num_gpus = args.distributed.dp_replicate * args.distributed.dp_shard
+    if args.steps is None:
+        if args.total_flops is None:
+            raise ValueError("Either steps or total_flops must be set")
+        else:
+            logger.info(f"Total flops: {args.total_flops:,}")
+            num_sequences = args.total_flops / deepmind_flops_per_sequence(
+                args.model.n_layers,
+                args.model.n_heads,
+                args.model.dim,
+                args.data.seq_len,
+                args.model.vocab_size,
+            )
+            args.steps = int(num_sequences / (args.data.batch_size * args.grad_acc_steps * num_gpus))
+            args.tokens = num_sequences * args.data.seq_len
+            logger.info(f"Total tokens: {args.tokens:,}")
+            logger.info(f"Setting steps to {args.steps:,}")
+    else:
+        seq_per_step = args.data.batch_size * args.grad_acc_steps * num_gpus
+        args.total_flops = deepmind_flops_per_sequence(
+            args.model.n_layers,
+            args.model.n_heads,
+            args.model.dim,
+            args.data.seq_len,
+            args.model.vocab_size,
+        ) * args.steps * seq_per_step
+        args.tokens = args.steps * seq_per_step * args.data.seq_len
+        logger.info(f"Total flops: {args.total_flops:,}")
+        logger.info(f"Total tokens: {args.tokens:,}")
+
+    assert (args.model.dim % args.model.n_heads == 0) and (bin(args.model.dim // args.model.n_heads).count('1') == 1), "model.dim / model.n_heads must be a power of 2 for eval which uses flex attention"
 
     if args.checkpoint.path is None:
         logger.info(f"Setting checkpoint path to {args.checkpoint.path}")
@@ -186,6 +264,7 @@ def validate_train_args(args: TrainArgs, output_size: int):
     ), "Don't profile during probe step"
     if args.logging.wandb is not None:
         args.logging.wandb.name = args.name
+        args.logging.wandb.job_type = "train"
 
     if args.probe_freq is not None:
         assert (
@@ -214,18 +293,71 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
     return test
 
 
+def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: CheckpointManager, metric_logger: MetricLogger, upload_wandb: bool = False, terminal_eval_wandb: bool = False):
+    from apps.main.eval import (
+        launch_eval,
+        run_eval,
+        EVAL_FOLDER_NAME,
+        EvalArgs,
+    )
+    eval_args = dataclass_from_dict(EvalArgs, args.eval)
+
+    eval_args.global_step = train_state.step
+    eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
+    eval_args.dump_dir = str(
+        os.path.join(
+            args.dump_dir,
+            "evals",
+            EVAL_FOLDER_NAME.format(train_state.step),
+        )
+    )
+    eval_args.metric_log_dir = args.dump_dir
+    if args.async_eval_gpus is None:
+        eval_results = launch_eval(eval_args)
+        # eval_results = run_eval(eval_args, model, tokenizer)
+        # model.train()
+        if get_is_master():
+            print(eval_results)
+            metric_logger.log(eval_results, use_step=False)
+    elif get_is_master():
+        if upload_wandb and wandb.run is not None and args.logging.wandb is not None:
+            eval_wandb_args = deepcopy(args.logging.wandb)
+            eval_wandb_args.id = args.logging.wandb.id + "_eval"
+            eval_wandb_args.name = args.logging.wandb.name + "_eval"
+            eval_wandb_args.job_type = "eval"
+            eval_args.logging.wandb = eval_wandb_args
+            if terminal_eval_wandb: # for terminal eval, never resume (this should be the only run, and pass this flag to the eval script so it knows to upload everything in the run)
+                eval_wandb_args.resume = "never"    
+                eval_args.terminal_eval_wandb = True
+        assert args.async_eval_gpus > 0
+        logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
+        eval_slurm_args = deepcopy(args.slurm)
+        eval_slurm_args.config = asdict(eval_args)
+        eval_slurm_args.script = "apps.main.eval"
+        eval_slurm_args.copy_code = False
+        if args.async_eval_gpus > 8:
+            eval_slurm_args.nodes = args.async_eval_gpus // 8
+            eval_slurm_args.ngpu = 8
+        else:
+            eval_slurm_args.nodes = 1
+            eval_slurm_args.ngpu = args.async_eval_gpus
+        with clean_env():
+            launch_job(eval_slurm_args)
+
+
 def train(args: TrainArgs):
     with ExitStack() as context_stack:
-        saved = False  # set saved at start, since a SIGTERM can happen at any point
+        validate_dump_dir(args)
+        if get_is_master():
+            os.makedirs(args.dump_dir, exist_ok=True)
+            dump_config(args, Path(args.dump_dir) / "config.yaml")
+        init_logger(Path(args.dump_dir) / "train.log")
+        saved = False # set saved at start, since a SIGTERM can happen at any point
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
             args,
             tokenizer.n_words,
         )
-        if get_is_master():
-            os.makedirs(args.dump_dir, exist_ok=True)
-            dump_config(args, Path(args.dump_dir) / "config.yaml")
-        init_logger(Path(args.dump_dir) / "train.log")
         init_signal_handler(set_preemption_flag)  # For handling preemption signals.
         if args.deterministic:
             logger.warning(
@@ -371,10 +503,14 @@ def train(args: TrainArgs):
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
 
+        train_start_time = time.time()
         nwords_since_last_log = 0
+        loss_for_logging = 0
         time_last_log = timer()
         gc.collect()
         while train_state.step < args.steps:
+            if train_state.acc_step == 0: # we just did a gradient update or started the training loop, so reset the accumulator
+                loss_for_logging = 0
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
@@ -449,8 +585,8 @@ def train(args: TrainArgs):
             loss = loss / args.grad_acc_steps
             # backward on scaled loss to create scaled gradients
             loss.backward()
-            # For logging we undo that scaling
-            loss = loss.detach() * args.grad_acc_steps
+            # track gradient accumulated loss for logging. when acc_step=1, we reset the accumulator since this is the first step.
+            loss_for_logging += loss.item()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=args.optim.clip, foreach=True
@@ -510,6 +646,11 @@ def train(args: TrainArgs):
                     )
                     * wps
                 )
+                H200_FLOPS = 989e12 # 'book flops' for H200
+                H200_MFU = FLOPS / H200_FLOPS
+                elapsed_time = time.time() - train_start_time
+                total_time_estimate = elapsed_time / train_state.step * args.steps
+                eta_estimate = total_time_estimate - elapsed_time
                 metrics = flatten_dict(
                     {
                         "global_step": train_state.step,
@@ -517,6 +658,7 @@ def train(args: TrainArgs):
                         "speed": {
                             "wps": wps,
                             "FLOPS": FLOPS,
+                            "H200_MFU": H200_MFU,
                             "curr_iter_time": curr_iter_time,
                             "data_load_time": data_load_time,
                         },
@@ -525,13 +667,18 @@ def train(args: TrainArgs):
                             "lr": curr_lr,
                             "total_tokens": total_tokens,
                         },
+                        "time": {
+                            "elapsed_time": elapsed_time,
+                            "total_time_estimate": total_time_estimate,
+                            "eta_estimate": eta_estimate,
+                        },
                         "memory": gpu_mem_stats._asdict(),
                     },
                     sep="/",
                 )
 
                 to_sync = {}
-                to_sync["loss/out"] = loss.item()
+                to_sync["loss/out"] = loss_for_logging
                 metrics.update(dist_mean_dict(to_sync))
 
                 if get_is_master():
@@ -543,7 +690,7 @@ def train(args: TrainArgs):
                 logger.info(
                     f"step: {train_state.step}"
                     f"  acc: {train_state.acc_step}"
-                    f"  loss: {round(loss.item(),4):>7}"
+                    f"  loss: {round(loss_for_logging,4):>7}"
                     f"  grad: {grad_norm:.2e}"
                     f"  flops: {FLOPS:.2e}"
                     f"  wps: {wps:.2e}"
@@ -569,54 +716,18 @@ def train(args: TrainArgs):
             if args.eval is not None and every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
             ):
-                from apps.main.eval import (
-                    EVAL_FOLDER_NAME,
-                    EvalArgs,
-                    launch_eval,
-                    run_eval,
+                is_final_eval = train_state.step == args.steps
+                launch_eval(
+                    args,
+                    train_state,
+                    checkpoint,
+                    metric_logger,
+                    upload_wandb=is_final_eval,
+                    terminal_eval_wandb=is_final_eval,
                 )
-
-                eval_args = dataclass_from_dict(EvalArgs, args.eval)
-
-                eval_args.global_step = train_state.step
-                eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
-                eval_args.dump_dir = str(
-                    os.path.join(
-                        args.dump_dir,
-                        "evals",
-                        EVAL_FOLDER_NAME.format(train_state.step),
-                    )
-                )
-                eval_args.metric_log_dir = args.dump_dir
-                if args.async_eval_gpus is None:
-                    eval_results = launch_eval(eval_args)
-                    # eval_results = run_eval(eval_args, model, tokenizer)
-                    # model.train()
-                    if get_is_master():
-                        print(eval_results)
-                        metric_logger.log(eval_results, use_step=False)
-                elif get_is_master():
-                    if wandb.run is not None and args.logging.wandb is not None:
-                        eval_wandb_args = deepcopy(args.logging.wandb)
-                        if eval_wandb_args.resume != "never":
-                            eval_wandb_args.resume = "must"
-                        eval_args.logging.wandb = eval_wandb_args
-                    assert args.async_eval_gpus > 0
-                    logger.info(f"Launching evals on {args.async_eval_gpus} gpus")
-                    eval_slurm_args = deepcopy(args.slurm)
-                    eval_slurm_args.config = asdict(eval_args)
-                    eval_slurm_args.script = "apps.main.eval"
-                    eval_slurm_args.copy_code = False
-                    if args.async_eval_gpus > 8:
-                        eval_slurm_args.nodes = args.async_eval_gpus // 8
-                        eval_slurm_args.ngpu = 8
-                    else:
-                        eval_slurm_args.nodes = 1
-                        eval_slurm_args.ngpu = args.async_eval_gpus
-                    with clean_env():
-                        launch_job(eval_slurm_args)
 
             if preemption_flag["flag"]:
+                checkpoint.wipe_shm() # terminate any async save processes and remove shm folders
                 if not saved:
                     checkpoint.save(
                         model,
@@ -624,6 +735,7 @@ def train(args: TrainArgs):
                         train_state,
                         args,
                         device_mesh=world_mesh,
+                        force_sync_save=True,
                     )
                 sys.exit(0)
 
@@ -634,6 +746,15 @@ def train(args: TrainArgs):
             train_state,
             args,
             device_mesh=world_mesh,
+            force_sync_save=True,
+        )
+        launch_eval(
+            args,
+            train_state,
+            checkpoint,
+            metric_logger,
+            upload_wandb=True,
+            terminal_eval_wandb=True,
         )
     gc.collect()
 

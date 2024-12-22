@@ -19,14 +19,8 @@
 eval "$($CONDA_PATH shell.bash hook)"
 source activate $CONDA_ENV_PATH
 
-# Parse the dump_dir and set it dynamically.
-if [[ -z "$DUMP_DIR" ]]; then   
-    export OUT_PATH=$(grep '^[[:space:]]*dump_dir:' $CONFIG_FILE | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-    export DUMP_DIR=$BASE_DIR/$OUT_PATH
-fi
-
-mkdir -p $DUMP_DIR
+mkdir -p out/logs
 
 export OMP_NUM_THREADS=1
 export LAUNCH_WITH="SBATCH"
-srun -o $DUMP_DIR/log.out -e $DUMP_DIR/log.err -n 1 -N 1 python -u -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
+srun -o out/logs/log_${SLURM_JOB_ID}.out -e out/logs/log_${SLURM_JOB_ID}.err -n 1 -N 1 python -u -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS

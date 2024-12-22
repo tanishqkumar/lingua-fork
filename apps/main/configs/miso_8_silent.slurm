@@ -13,7 +13,7 @@
 #SBATCH --open-mode=append
 #SBATCH --signal=USR2@120
 #SBATCH --distribution=block
-#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-type=NONE
 
 # Mimic the effect of "conda init", which doesn't work for scripts
 eval "$($CONDA_PATH shell.bash hook)"

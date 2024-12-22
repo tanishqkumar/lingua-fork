@@ -11,7 +11,7 @@ from multiprocessing.synchronize import Event as EventClass
 import os
 from pathlib import Path
 from queue import Full
-from typing import Dict, Any, Iterator, Optional, TypedDict
+from typing import Callable, Dict, Any, Iterator, Optional, TypedDict
 from lingua.tokenizer import build_tokenizer, TokenizerArgs
 import numpy as np
 import logging
@@ -71,6 +71,7 @@ class JSONLState(TypedDict):
         window (int): The window size used for iteration.
         offset (int): The offset used for iteration.
         current_iter (Optional[int]): Number of iterations over the jsonl file (for infinite iteration).
+        filter_function (Optional[Callable[[str], bool]]): Function to filter lines
     """
 
     file_path: str
@@ -78,7 +79,7 @@ class JSONLState(TypedDict):
     block_size: int
     offset: int
     current_iter: int
-
+    filter_function: Optional[Callable[[str], bool]]
 
 class MultiChoiceState(TypedDict):
     """Represents the current state of a Multi choice iterator.
@@ -136,31 +137,38 @@ class PrefetchState(TypedDict):
     batch_size: int
 
 
+def wiki_filter(line: str) -> bool:
+    jline = json.loads(line)
+    return 'en.wikipedia' not in jline['metadata']['url']
+
+
+def filter_selector(filter_name: str) -> Callable[[str], bool]:
+    if filter_name == "rm_en.wikipedia":
+        return wiki_filter
+    else:
+        raise ValueError(f"Filter {filter_name} not found")
+
+
 def read_jsonl(
     file_path: str,
     position: int,
     block_size: int,
     offset: int,
     current_iter: int,
+    filter_function: Optional[Callable[[str], bool]] = None,
 ):
     """Iterates over a JSON Lines file, yielding a line every `block_size` lines with an offset
-
-    Example : If block_size = 3, offset = 1, iterator will yield lines 1 4 7 10 ...
-    Example : If block_size = 2, offset = 0, iterator will yield lines 0 2 4 6 ...
-
+    
     Args:
         file_path (str): Path to the JSONL file.
         position (int): The file position (in bytes) from which to start reading.
         block_size (int): The number of lines to skip between yields
         offset (int): The initial number of lines skiped
-
-    Yields:
-        JSONLState: Represents the state of each line read according to window and offset.
+        filter_function (Optional[Callable[[str], bool]]): Function to filter lines
     """
     if (offset < 0) or (offset >= block_size):
         raise RuntimeError(f"JSONL iterator offset value is invalid")
-    # We assume the start position is either 0 or given by the last line yielded
-    # Therefore the current line is right after the offset (modulo block_size)
+    
     current_line = offset + 1 if position > 0 else 0
 
     state = JSONLState(
@@ -169,22 +177,29 @@ def read_jsonl(
         block_size=block_size,
         offset=offset,
         current_iter=current_iter,
+        filter_function=filter_function,
     )
+    
     with open(file_path, "r") as file:
         file.seek(position)
         while line := file.readline():
             current_line += 1
+
+            # Skip line if filter array indicates it should be filtered
+            if filter_function is not None and not filter_function(line):
+                continue
+
             if (current_line - 1) % block_size == offset:
-                # We return state that will allow resuming from this position
-                # We update state for next position
                 state = JSONLState(
                     file_path=file_path,
                     position=file.tell(),
                     block_size=block_size,
                     offset=offset,
                     current_iter=current_iter,
+                    filter_function=filter_function,
                 )
                 yield json.loads(line), state
+            
 
 
 def loop_on_jsonl(
@@ -193,11 +208,12 @@ def loop_on_jsonl(
     block_size: int,
     offset: int,
     current_iter: int,
+    filter_function: Optional[Callable[[str], bool]] = None,
 ):
     """Makes the block jsonl iterator infinite and updates n_iter counter"""
     try:
         while True:
-            it = read_jsonl(file_path, position, block_size, offset, current_iter)
+            it = read_jsonl(file_path, position, block_size, offset, current_iter, filter_function)
             for content, jsonl_state in it:
                 yield content, jsonl_state
             current_iter += 1
@@ -483,7 +499,7 @@ def find_and_sanitize_chunks(dataset_path: str, world_size: int, file_pattern: s
     return dataset_chunks
 
 
-def distribute_data_to_rank(dataset_path: str, rank: int, world_size: int, file_pattern: str):
+def distribute_data_to_rank(dataset_path: str, rank: int, world_size: int, file_pattern: str, filter_function: Optional[Callable[[str], bool]] = None):
     """
     Distributes the chunk files in a dataset path to each worker.
     If world_size is smaller than the number of chunks, the extra chunks are discarded.
@@ -502,6 +518,7 @@ def distribute_data_to_rank(dataset_path: str, rank: int, world_size: int, file_
                     block_size=n_ranks_per_chunk,
                     offset=i,
                     current_iter=0,
+                    filter_function=filter_function,
                 )
             )
 
@@ -515,11 +532,14 @@ def init_choice_state(
     rank: int,
     world_size: int,
     file_pattern: str,
+    source_filter_functions: Optional[Dict[str, str]] = None,
 ):
+    logger.info(f"Initializing choice state with sources {sources} and filter array {source_filter_functions}") 
     data_path_to_jsonl_state = dict()
     for dataset_path in sources:
+        filter_function = filter_selector(source_filter_functions[dataset_path]) if source_filter_functions is not None else None
         jsonl_state = distribute_data_to_rank(
-            os.path.join(root_dir, dataset_path), rank, world_size, file_pattern
+            os.path.join(root_dir, dataset_path), rank, world_size, file_pattern, filter_function
         )
         data_path_to_jsonl_state[dataset_path] = jsonl_state
 
@@ -550,10 +570,11 @@ def init_state(
     add_eos: bool,
     tokenizer_name: str,
     tokenizer_path: Optional[str] = None,
-    file_pattern: str = TRAIN_DATA_FILE_PATTERN
+    file_pattern: str = TRAIN_DATA_FILE_PATTERN,
+    source_filter_functions: Optional[Dict[str, str]] = None,
 ):
     multi_choice_state = init_choice_state(
-        root_dir=root_dir, sources=sources, seed=seed, rank=rank, world_size=world_size, file_pattern=file_pattern
+        root_dir=root_dir, sources=sources, seed=seed, rank=rank, world_size=world_size, file_pattern=file_pattern, source_filter_functions=source_filter_functions
     )
     tokenizer_state = TokenizerState(
         it_state=multi_choice_state,
@@ -593,6 +614,7 @@ def setup_sources(multi_state):
             jsonl_state["block_size"],
             jsonl_state["offset"],
             jsonl_state["current_iter"],
+            jsonl_state["filter_function"],
         )
 
     return path_to_iter
@@ -711,6 +733,7 @@ def async_iterator(buffer_size: int, iterator_builder):
 class DataArgs:
     root_dir: Optional[str] = None
     sources: Dict[str, float] = field(default_factory=dict)
+    source_filter_functions: Optional[Dict[str, str]] = None
     batch_size: int = 2
     seq_len: int = 2048
     n_views: int = 2
@@ -741,6 +764,7 @@ def init_dataloader_state_from_args(
         tokenizer_path=args.tokenizer.path,
         add_bos=args.add_bos,
         add_eos=args.add_eos,
+        source_filter_functions=args.source_filter_functions,
     )
 
 

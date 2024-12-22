@@ -1,5 +1,5 @@
 # dump_dir: !!!CHANGE_THIS!!!
-dump_dir: out/llama_1B_8H200
+dump_base: out
 name: llama_1B_8H200
 steps: 63_578  # chinchilla optimal - 1525879 steps w/ 2048 slen and bsz 8. Divide by 24 with 8 gpus at 3 acc.
 probe_freq: null
@@ -61,7 +61,6 @@ logging:
   freq: 1
   wandb:
     project: lingua-tests
-    name: llama_1B_8H200
 
 async_eval_gpus: 1
 eval:

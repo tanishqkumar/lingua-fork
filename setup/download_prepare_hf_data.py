@@ -82,6 +82,9 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         "fineweb_edu_10bt": "HuggingFaceFW/fineweb-edu",
         "dclm_baseline_1.0": "mlfoundations/dclm-baseline-1.0",
         "dclm_baseline_1.0_10prct": "mlfoundations/dclm-baseline-1.0",
+        "dclm_pool_1b_1x": "mlfoundations/dclm-pool-1b-1x",
+        "cosmopedia_v2": "HuggingFaceTB/smollm-corpus",
+        "python_edu": "HuggingFaceTB/smollm-corpus",
     }[dataset]
     src_dir = f"{data_dir}/{dataset}"
     out_dir = f"{src_dir}_shuffled"
@@ -93,18 +96,27 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         "fineweb_edu_10bt": ".jsonl",
         "dclm_baseline_1.0": ".jsonl.zst",
         "dclm_baseline_1.0_10prct": ".jsonl.zst",
+        "dclm_pool_1b_1x": ".jsonl.zst",
+        "cosmopedia_v2": ".jsonl",
+        "python_edu": ".jsonl",
     }[dataset]
     cat_command = {
         "fineweb_edu": "cat {}",
         "fineweb_edu_10bt": "cat {}",
         "dclm_baseline_1.0": "zstdcat {} && echo",
         "dclm_baseline_1.0_10prct": "zstdcat {} && echo",
+        "dclm_pool_1b_1x": "zstdcat {} && echo",
+        "cosmopedia_v2": "cat {}",
+        "python_edu": "cat {}",
     }[dataset]
     allow_patterns = {
         "fineweb_edu": None,
         "fineweb_edu_10bt": "sample/10BT/*",
         "dclm_baseline_1.0": "*.jsonl.zst",
         "dclm_baseline_1.0_10prct": "global-shard_01_of_10/*.jsonl.zst",
+        "dclm_pool_1b_1x": "*.jsonl.zst",
+        "cosmopedia_v2": "cosmopedia-v2/*",
+        "python_edu": "python-edu/*",
     }[dataset]
     suffix = ".jsonl"
     k_validation = 10000  # Number of lines to take from each chunk for validation
@@ -115,7 +127,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
     # Download dataset
     download_dataset(repo_id, src_dir, allow_patterns)
 
-    if "fineweb" in dataset:
+    if "fineweb" in dataset or "cosmopedia" in dataset:
         parquet_to_jsonl(dataset, work_dir, src_dir, src_dir)
 
     # Set up environment variables
@@ -128,7 +140,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         f"ulimit -n 100000 && "
         f"find {src_dir} -type f -name '*{orig_extension}' -print0 | xargs -0 -I {{}} sh -c '{cat_command}' | {terashuf_executable} | "
         f"split -n r/{nchunks} -d --suffix-length 2 --additional-suffix {suffix} - {out_dir}/{prefix}"
-        "; trap 'echo \"Caught signal 13, exiting with code 1\"; exit 1' SIGPIPE;"
+        "; trap 'echo \"Caught signal 13, exiting with code 1\"; exit 1' PIPE;"
     )
 
     # Create validation set and remove lines from chunks
@@ -145,10 +157,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", type=str)
     parser.add_argument("memory", type=float, default=8)
+    parser.add_argument("--tmp_dir", type=str, default="/tmp")
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--nchunks", type=int, default=32)
 
+
     args = parser.parse_args()
 
+    os.environ["TMPDIR"] = args.tmp_dir
     main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks)

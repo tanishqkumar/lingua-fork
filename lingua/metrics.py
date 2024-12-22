@@ -219,6 +219,7 @@ def upload_train_to_wandb(
                         if "/" in name
                     },
                     step=m["global_step"],
+                    commit=True,
                 )
 
         wandb.finish()
