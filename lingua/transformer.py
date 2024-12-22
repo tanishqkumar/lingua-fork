@@ -35,6 +35,10 @@ class BaseTransformerArgs:
     n_heads: Optional[int] = None
     n_kv_heads: Optional[int] = None
 
+    # If provided, use exactly this value as the hidden dim for the feedforward layer
+    # Otherwise, we compute it to be ~2/3 of 4*dim (since we use a gated MLP)
+    hidden_dim: Optional[int] = None
+
     ffn_dim_multiplier: Optional[float] = None
 
     multiple_of: int = 256
@@ -480,14 +484,17 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        force_hidden_dim_value: bool = False,  # If provided, use exactly the hidden_dim value instead of computing it
         mp_size: int = 1,
     ):
         super().__init__()
 
-        hidden_dim = int(2 * hidden_dim / 3)
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        if not force_hidden_dim_value:
+            hidden_dim = int(2 * hidden_dim / 3)
+            if ffn_dim_multiplier is not None:
+                hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+            hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        
         assert hidden_dim % mp_size == 0
 
         self.dim = dim
@@ -561,9 +568,10 @@ class TransformerBlock(nn.Module):
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
-            hidden_dim=4 * args.dim,
+            hidden_dim=args.hidden_dim if args.hidden_dim is not None else 4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
+            force_hidden_dim_value=args.hidden_dim is not None
         )
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
