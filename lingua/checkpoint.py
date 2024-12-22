@@ -6,12 +6,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-<<<<<<< HEAD
-from typing import List, Optional, Tuple
-=======
 import time
 from typing import Callable, List, Optional, Tuple
->>>>>>> origin/main
 
 import shutil
 import torch
@@ -28,15 +24,12 @@ from torch.distributed.checkpoint.state_dict import (
     get_state_dict,
     set_state_dict,
 )
-<<<<<<< HEAD
-=======
 from torch.distributed.checkpoint.format_utils import (
     torch_save_to_dcp,
     dcp_to_torch_save,
 )
 import torch.optim.optimizer
 from multiprocessing import Process
->>>>>>> origin/main
 
 from lingua.distributed import get_is_master
 
@@ -132,18 +125,10 @@ class CheckpointManager:
         self.eval_every = args.eval
         self.init_ckpt_path = args.init_ckpt_path
         self.continue_training_from_init = args.continue_training_from_init
-<<<<<<< HEAD
-
-        assert os.path.exists(
-            self.path
-        ), f"Path {self.path} does not exist and needs to be created before using CheckpointManager (use instantiate_and_make_dir)"
-=======
         self.async_save_mode = args.async_save_mode
         self.async_cleanup = args.async_cleanup
         self.thread_debug = args.thread_debug
         assert os.path.exists(self.path), f"Path {self.path} does not exist and needs to be created before using CheckpointManager (use instantiate_and_make_dir)"
->>>>>>> origin/main
-
         self.existing_saves = self.get_existing_saves()
         # used for async saving
         self._shm_save_hash = hex(hash(str(time.time()+dist.get_rank())))[-8:]
