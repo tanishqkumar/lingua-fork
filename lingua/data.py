@@ -119,6 +119,8 @@ class PackTokensState(TypedDict):
     output_seq_len: int
     n_views: int
     seq_len: int
+    rng_state: Dict[str, Any]
+    randomize_rate: float
 
 
 class PrefetchState(TypedDict):
@@ -334,6 +336,7 @@ def get_empty_buffer_state(
 
 def pack_tokens(
     iterator: Iterator,
+    randomize_rate: float,
     empty_buffer_state: PackTokensState,
 ):
     """
@@ -349,6 +352,7 @@ def pack_tokens(
     - start_token (int): The index of the first token to start reading from for the first sequence.
     - output_seq_len (int): The length of the output sequences to be generated.
     - n_views (int): The number of shifted views to include in each output chunk.
+    - randomize_rate (float): The rate at which examples are completely randomized (shuffled along the seq dim, turning the seq into garbage)
 
     Yields:
     - numpy.ndarray: An array of shape `(output_seq_len, n_views)` containing the packed tokens.
@@ -356,6 +360,9 @@ def pack_tokens(
 
     The function handles the complexity of determining the correct state for resuming iteration after the buffer is cleared, ensuring seamless continuation of token sequences.
     """
+    rng = np.random.default_rng()
+    rng.bit_generator.state = empty_buffer_state["rng_state"]
+    _rng_state = empty_buffer_state["rng_state"]
     buffer = []
     states = []
     output_seq_len = empty_buffer_state["output_seq_len"]
@@ -367,14 +374,24 @@ def pack_tokens(
         end_token = start_token
         sample_is_read = False
         while not sample_is_read:
+            
             assert start_token < len(
                 tokens
             ), f"Start token index {start_token} bigger than sequence {len(tokens)}"
             free_space = buffer_size - len(buffer)
             seq_len = min(free_space, len(tokens) - start_token)
             end_token = start_token + seq_len
-            buffer.extend(tokens[start_token:end_token])
+            
+            # Get the token slice
+            token_slice = tokens[start_token:end_token]
+            
+            # Randomly shuffle with probability randomize_rate
+            if randomize_rate > 0 and rng.random() < randomize_rate:
+                token_slice = rng.permutation(token_slice)
+
+            buffer.extend(token_slice)
             start_token = end_token
+            _rng_state = rng.bit_generator.state
 
             states.append(
                 PackTokensState(
@@ -383,6 +400,8 @@ def pack_tokens(
                     it_state=previous_state,
                     output_seq_len=output_seq_len,
                     n_views=n_views,
+                    rng_state=rng.bit_generator.state,
+                    randomize_rate=randomize_rate,
                 )
             )
             assert len(buffer) <= buffer_size, "Buffer overflow"
@@ -406,6 +425,10 @@ def pack_tokens(
                 start_token = 0
                 sample_is_read = True
                 previous_state = state
+
+
+    
+
 
 
 def batch_and_shuffle_prefetched_sequences(
@@ -566,6 +589,7 @@ def init_state(
     seed: int,
     rank: int,
     world_size: int,
+    randomize_rate: float,
     add_bos: bool,
     add_eos: bool,
     tokenizer_name: str,
@@ -583,12 +607,19 @@ def init_state(
         name=tokenizer_name,
         path=tokenizer_path,
     )
+
+    pack_rng_state = np.random.default_rng(
+        (seed + 2, rank, world_size) # picking seed + 2 to keep prefetch_rng_state the same as original lingua
+    ).bit_generator.state
+
     pack_state = PackTokensState(
         start_token=0,
         it_state=tokenizer_state,
         output_seq_len=seq_len,
         n_views=n_views,
         seq_len=0,
+        rng_state=pack_rng_state,
+        randomize_rate=randomize_rate,
     )
 
     prefetch_rng_state = np.random.default_rng(
@@ -646,6 +677,7 @@ def build_dataloader(
 
     data_it = pack_tokens(
         data_it,
+        pack_state["randomize_rate"],
         pack_state,
     )
 
@@ -734,6 +766,7 @@ class DataArgs:
     root_dir: Optional[str] = None
     sources: Dict[str, float] = field(default_factory=dict)
     source_filter_functions: Optional[Dict[str, str]] = None
+    randomize_rate: float = 0.0
     batch_size: int = 2
     seq_len: int = 2048
     n_views: int = 2
@@ -756,6 +789,7 @@ def init_dataloader_state_from_args(
         seq_len=args.seq_len,
         batch_size=args.batch_size,
         prefetch_size=args.prefetch_size,
+        randomize_rate=args.randomize_rate,
         n_views=args.n_views,
         seed=args.seed,
         rank=rank,
