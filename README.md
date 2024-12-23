@@ -97,7 +97,9 @@ Here is an example entry (from a fineweb sample) in the jsonl file. The fileload
 {"text":"|Henry Gray (18251861). Anatomy of the Human Body. 1918.|\n|tubercle on its posterior surface, medial to the groove for the tendon of the Flexor hallucis longus. The deep fibers (anterior talotibial) are attached, above, to the tip of the medial malleolus, and, below, to the medial surface of the talus. The deltoid ligament is covered by the tendons of the Tibialis posterior and Flexor digitorum longus.|\n| The anterior and posterior talofibular and the calcaneofibular ligaments were formerly described as the three fasciculi of the external lateral ligament of the ankle-joint.|\nThe Anterior Talofibular Ligament. (ligamentum talofibulare anterius) (Fig. 355).The anterior talofibular ligament, the shortest of the three, passes from the anterior margin of the fibular malleolus, forward and medially, to the talus, in front of its lateral articular facet.\nThe Posterior Talofibular Ligament (ligamentum talofibulare posterius) (Fig. 355).The posterior talofibular ligament, the strongest and most deeply seated, runs almost horizontally from the depression at the medial and back part of the fibular malleolus to a prominent tubercle on the posterior surface of the talus immediately lateral to the groove for the tendon of the Flexor hallucis longus.\nThe Calcaneofibular Ligament (ligamentum calcaneofibulare) (Fig. 355).The calcaneofibular ligament, the longest of the three, is a narrow, rounded cord, running from the apex of the fibular malleolus downward and slightly backward to a tubercle on the lateral surface of the calcaneus. It is covered by the tendons of the Peronæi longus and brevis.\nFIG. 356 Capsule of left talocrura articulation (distended). Lateral aspect. (See enlarged image)\nSynovial Membrane (Fig. 356).The synovial membrane invests the deep surfaces of the ligaments, and sends a small process upward between the lower ends of the tibia and fibula.\nRelations.The tendons, vessels, and nerves in connection with the joint are, in front, from the medial side, the Tibialis anterior, Extensor hallucis proprius, anterior tibial vessels, deep peroneal nerve, Extensor digitorum longus, and Peronæus tertius; behind, from the medial side, the Tibialis posterior, Flexor digitorum longus, posterior tibial vessels, tibial nerve, Flexor hallucis longus; and, in the groove behind the fibular malleolus, the tendons of the Peronæi longus and brevis.\n| The arteries supplying the joint are derived from the malleolar branches of the anterior tibial and the peroneal.|\n| The nerves are derived from the deep peroneal and tibial.|\nMovements.When the body is in the erect position, the foot is at right angles to the leg. The movements of the joint are those of dorsiflexion and extension; dorsiflexion consists in the","id":"<urn:uuid:8cd958a8-013d-4fc6-91dd-ce0778145d63>","metadata":{"dump":"CC-MAIN-2018-05","url":"http://www.bartleby.com/107/pages/page351.html","file_path":"s3://commoncrawl/crawl-data/CC-MAIN-2018-05/segments/1516084891706.88/warc/CC-MAIN-20180123032443-20180123052443-00542.warc.gz","language":"en","language_score":0.7337160110473633,"token_count":721,"score":2.734375,"int_score":3}}
 ```
 
-# Notes - disk space and fast checkpointing
+# Notes
+
+## Disk space and fast checkpointing
 
 Disk sizes needed for checkpoints from inspecting some runs
 | Model | Size |
@@ -123,7 +125,18 @@ Any eval jobs that rely on checkpoints will wait until the sentinel files `check
 
 Use of async checkpointing can have its own complications - the threads may sometimes not properly cleanup, and leave weird files in `/dev/shm` or crash due to lack of space on `shm`. Setting `async_save_mode: null` will disable this.
 
+## Downloading and shuffling data
 
+To download and shuffle a dataset on a small, fast disk (such as `/scr-ssd` on one of the Miso machines) and later transfer to a slower, larger disk (such as `/juice5b`), you can use the `setup/download_prepare_hf_data.py` script.
+
+```bash
+python setup/download_prepare_hf_data.py dclm_baseline_1.0_10prct 999 --tmp_dir=/scr-ssd/nlp/tmp --data_dir=/scr-ssd/nlp/data --seed=42 --nchunks=8 --final_data_dir=/juice5b/scr5b/nlp/data/huggingface/lingua-data --clear_work_dir_after_transfer_to_final
+```
+
+This will
+1. First download the data to `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct` and shuffle it, writing the shuffled data to `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct_shuffled`.
+2. Copy the shuffled data to the slow disk at `/juice5b/scr5b/nlp/data/huggingface/lingua-data/dclm_baseline_1.0_10prct_shuffled`.
+3. Clear the work directories at `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct` and `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct_shuffled` if the `--clear_work_dir_after_transfer_to_final` flag is set.
 
 # Changelog
 

@@ -75,7 +75,7 @@ def setup_terashuf(work_dir):
     return terashuf_dir
 
 
-def main(dataset, memory, data_dir, seed=42, nchunks=32):
+def main(dataset, memory, data_dir, final_data_dir=None, clear_work_dir=False, seed=42, nchunks=32):
     # Configuration
     repo_id = {
         "fineweb_edu": "HuggingFaceFW/fineweb-edu",
@@ -150,6 +150,28 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         run_command(f"head -n {k_validation} {chunk_file} >> {validation_file}")
         run_command(f"sed -i '1,{k_validation}d' {chunk_file}")
 
+    print(f"Processing completed in work directory {work_dir}")
+
+    # Handle final data directory transfer if specified
+    if final_data_dir:
+        final_out_dir = os.path.join(final_data_dir, f"{dataset}_shuffled")
+        
+        print(f"Copying shuffled data to final destination: {final_out_dir}")
+        os.makedirs(final_data_dir, exist_ok=True)
+        
+        # Use rsync with these flags:
+        # -a: archive mode (preserves permissions, timestamps, etc.)
+        # -v: verbose
+        # -P: shows progress and allows partial transfer resumption
+        # --delete: remove files in dest that aren't in source
+        run_command(f"rsync -avP --delete {out_dir}/ {final_out_dir}")
+        
+        # Clear work directories if requested
+        if clear_work_dir:
+            print("Clearing work directories...")
+            run_command(f"rm -rf {src_dir}")
+            run_command(f"rm -rf {out_dir}")
+            
     print("All tasks completed successfully!")
 
 
@@ -161,9 +183,27 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--nchunks", type=int, default=32)
-
+    parser.add_argument(
+        "--final_data_dir", 
+        type=str, 
+        default=None, 
+        help="Final destination for the shuffled data, e.g., a slower, large disk."
+    )
+    parser.add_argument(
+        "--clear_work_dir_after_transfer_to_final", 
+        action="store_true",
+        help="Clear work directories after transferring to final location."
+    )
 
     args = parser.parse_args()
 
     os.environ["TMPDIR"] = args.tmp_dir
-    main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks)
+    main(
+        args.dataset, 
+        args.memory, 
+        args.data_dir, 
+        args.final_data_dir, 
+        args.clear_work_dir_after_transfer_to_final,
+        args.seed,
+        args.nchunks
+    )
