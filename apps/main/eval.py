@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from lm_eval.api.instance import Instance
@@ -87,6 +88,7 @@ class EvalArgs:
 
     global_step: Optional[int] = None  # for in-training evaluation
     terminal_eval_wandb: bool = False
+    wipe_ckpt: bool = False
 
 
 def all_dicts_same(dict_list):
@@ -420,6 +422,15 @@ def main():
             # Write sentinel file to mark eval completion
             eval_complete_path = Path(cfg.ckpt_dir) / "eval.complete"
             eval_complete_path.touch()
+
+        # Remove consolidated subdirectory if it exists
+        consolidated_dir = ckpt_dir / "consolidated"
+        if consolidated_dir.exists():
+            shutil.rmtree(consolidated_dir)
+
+        if cfg.wipe_ckpt:
+            # Remove the entire checkpoint directory
+            shutil.rmtree(ckpt_dir)
 
 
 if __name__ == "__main__":
