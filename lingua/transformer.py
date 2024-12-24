@@ -34,6 +34,8 @@ class BaseTransformerArgs:
     n_heads: Optional[int] = None
     n_kv_heads: Optional[int] = None
 
+    qk_norm: bool = False
+
     ffn_dim_multiplier: Optional[float] = None
 
     multiple_of: int = 256
@@ -300,6 +302,8 @@ class Attention(nn.Module):
         n_heads: int,
         n_kv_heads: int,
         rope_theta: float,
+        qk_norm: bool = False,
+        qk_norm_eps: float = 1e-6,
     ):
         super().__init__()
 
@@ -333,6 +337,11 @@ class Attention(nn.Module):
             bias=False,
         )
 
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(head_dim, eps=qk_norm_eps)
+            self.k_norm = RMSNorm(head_dim, eps=qk_norm_eps)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -354,6 +363,10 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
+
+        if self.qk_norm:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
 
         # This condition helps us be easily compatible
         # with inference by adding a pluggable KVCache
@@ -416,6 +429,9 @@ class Attention(nn.Module):
             b=3 * init_std,
         )
 
+        if self.qk_norm:
+            self.q_norm.reset_parameters()
+            self.k_norm.reset_parameters()
 
 class FeedForward(nn.Module):
     def __init__(
@@ -502,6 +518,8 @@ class TransformerBlock(nn.Module):
             n_heads=self.n_heads,
             n_kv_heads=self.n_kv_heads,
             rope_theta=args.rope_theta,
+            qk_norm=args.qk_norm,
+            qk_norm_eps=args.norm_eps,
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
