@@ -68,6 +68,7 @@ from apps.main.transformer import (
 )
 from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
+from apps.main.eval import EvalArgs
 
 import wandb
 
@@ -107,7 +108,7 @@ class TrainArgs:
     # If set to None, eval is run locally otherwise it launches a new job with the given number of gpus
     async_eval_gpus: Optional[int] = None
     slurm: StoolArgs = field(default_factory=StoolArgs)
-    eval: Optional[Any] = None
+    eval: Optional[EvalArgs] = field(default_factory=EvalArgs)
 
 
 @dataclass
@@ -308,7 +309,8 @@ def launch_eval(args: TrainArgs, train_state: TrainState, checkpoint: Checkpoint
         EVAL_FOLDER_NAME,
         EvalArgs,
     )
-    eval_args = dataclass_from_dict(EvalArgs, args.eval)
+    #eval_args = dataclass_from_dict(EvalArgs, args.eval) # note - not sure why the original code had this from_dict. this causes crashes with core_eval
+    eval_args = args.eval
 
     eval_args.global_step = train_state.step
     eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])

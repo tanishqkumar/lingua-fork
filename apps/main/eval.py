@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
@@ -89,6 +89,7 @@ class EvalArgs:
     global_step: Optional[int] = None  # for in-training evaluation
     terminal_eval_wandb: bool = False
     wipe_ckpt: bool = False
+    core_metrics: Optional[Dict[str, float]] = None
 
 
 def all_dicts_same(dict_list):
@@ -256,7 +257,7 @@ def launch_eval(cfg: EvalArgs):
     return log_results
 
 
-def metrics_postprocessor(metrics, hide_stderr=False):
+def metrics_postprocessor(cfg: EvalArgs, metrics, hide_stderr=False):
     """
     Simple way of postprocessing the eleuther metrics to be more readable / useful
     """
@@ -268,6 +269,12 @@ def metrics_postprocessor(metrics, hide_stderr=False):
                 new_k = k.replace("eval/", "eval_stderr/")
                 metrics_output[new_k] = v
             del metrics_output[k]  
+        elif k.startswith("eval/"):
+            task_name = k.split("/")[1].replace(",none", "")
+            if task_name in cfg.core_metrics:
+                new_k = k.replace("eval/", "core_eval/")
+                metrics_output[new_k] = v
+                del metrics_output[k]
     # compute eval/overall_avg as the average of all eval/* metrics
     # note - this averages over each metric, so it might double count tasks
     overall_sum = 0
@@ -276,8 +283,18 @@ def metrics_postprocessor(metrics, hide_stderr=False):
         if k.startswith("eval/"):
             overall_sum += v
             overall_count += 1
+    overall_core_sum = 0
+    overall_core_count = 0
+    for k, v in metrics_output.items():
+        if k.startswith("core_eval/"):
+            task_name = k.split("/")[1].replace(",none", "")
+            weight = cfg.core_metrics[task_name]
+            overall_core_sum += v * weight
+            overall_core_count += weight
     overall_avg = overall_sum / overall_count
     metrics_output["eval/overall_avg"] = overall_avg
+    overall_core_avg = overall_core_sum / overall_core_count
+    metrics_output["core_eval/overall_avg"] = overall_core_avg
     return metrics_output
 
 
@@ -300,7 +317,7 @@ def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
         log_results = {k: {k2: v2 for k2, v2 in v.items() if k2 != "alias"} for k, v in log_results.items()}
         log_results = {"eval/" + m.replace(".", "/"): v for m, v in log_results.items()}
         log_results = flatten_dict(log_results)
-        log_results = metrics_postprocessor(log_results)
+        log_results = metrics_postprocessor(cfg, log_results)
         if cfg.global_step is not None:
             log_results["global_step"] = cfg.global_step
         logger.info(f"All evaluation results: {log_results}")
