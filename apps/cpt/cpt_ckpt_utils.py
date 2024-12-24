@@ -8,4 +8,4 @@ LLAMA_PRETRAINED_CKPT_NAMES = {
 
 
 def is_llama_pretrained_ckpt(ckpt_path: str) -> bool:
-    return any(ckpt_path.endswith(name) for name in LLAMA_PRETRAINED_CKPT_NAMES)
+    return any(name in str(ckpt_path) for name in LLAMA_PRETRAINED_CKPT_NAMES)
