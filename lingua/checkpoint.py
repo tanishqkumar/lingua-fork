@@ -213,8 +213,8 @@ class CheckpointManager:
             keep_with_incompletes = set(eval_folders_to_keep) | set(
                 eval_incomplete_folders
             )
-            if not eval_folders_to_keep.issubset(keep_with_incompletes):
-                diff = eval_folders_to_keep - keep_with_incompletes
+            if not keep_with_incompletes.issubset(eval_folders_to_keep):
+                diff = keep_with_incompletes - eval_folders_to_keep
                 logger.warning(
                     f"WARNING: Attempted to clean up eval folders, but some are not yet complete. Disk usage may be higher than expected. Incomplete folders: {diff}"
                 )
