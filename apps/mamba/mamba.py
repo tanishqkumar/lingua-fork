@@ -80,7 +80,7 @@ class LMMamba(BaseMamba):
         )
 
         if args.weight_tying:
-            self.output.weight = self.embeddings.tok_embeddings.weight
+            self.output.weight = self.tok_embeddings.weight
 
     def forward(
         self,
