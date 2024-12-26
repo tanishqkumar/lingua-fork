@@ -30,6 +30,7 @@ from lingua.data import init_choice_state, setup_sources
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
+    dist_sum_dict,
     get_global_rank,
     get_world_size,
     setup_torch_distributed,
@@ -180,6 +181,8 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         path = os.path.join(train_cfg.data.root_dir, src)
         srcs[path] = 1.0
 
+    logger.info(f"Sources chosen: {srcs}")
+
     multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
     path_to_iter = setup_sources(multi_state)
 
@@ -198,20 +201,28 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             content_key = "text" if ("text" in content) else "content"
             texts.append(content[content_key])
         
+        # this logic by the lingua folks is not ideal - this always evaluates logprob on the last max_seq tokens.
         _, loglikelihood, _ = generator.generate(texts)
+        prompts = generator.get_prompts(texts)
 
-        metrics = defaultdict(list)
+        # Rewrote lingua code - originally does mean across workers, which is wrong.
+        # Should sum across workers and then average.
+        metrics = defaultdict(float)
         for i, ll in enumerate(loglikelihood):
-            tmp = ll.sum().item()
-            metrics['nll'].append(tmp)
-            metrics['nll_per_token'].append(tmp / len(ll))
-            metrics['nll_per_char'].append(tmp / len(texts[i]))
-
-            metrics['avg_seqlen'].append(len(ll))
+            tmp = -1*ll.sum().item()
+            metrics["ppl/total_samples"] += 1
+            metrics['ppl/total_nll'] += tmp
+            metrics['ppl/total_tokens'] += len(ll)
+            metrics['ppl/total_chars'] += len(prompts[i])
         
-        for m in metrics:
-            metrics[m] = sum(metrics[m]) / len(metrics[m])
-        metrics.update(dist_mean_dict(metrics))
+        metrics.update(dist_sum_dict(metrics))
+        
+        n_samples = metrics['ppl/total_samples']
+        metrics['ppl/seq_nll'] = metrics['ppl/total_nll'] / n_samples
+        metrics['ppl/tok_nll'] = metrics['ppl/total_nll'] / metrics['ppl/total_tokens'] if metrics['ppl/total_tokens'] > 0 else 0.0
+        metrics['ppl/char_nll'] = metrics['ppl/total_nll'] / metrics['ppl/total_chars'] if metrics['ppl/total_chars'] > 0 else 0.0
+        metrics['ppl/avg_seqlen'] = metrics['ppl/total_tokens'] / n_samples
+        
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
 
         name = os.path.basename(src)
@@ -250,11 +261,11 @@ def launch_eval(cfg: EvalArgs):
     )
     torch.distributed.barrier()
     logger.info("Model loaded")
-    log_results = run_eval(cfg, model, tokenizer)
+    log_results, val_results = run_eval(cfg, model, tokenizer, train_cfg)
     # Move model to CPU and delete it to free up memory, this is a temporary fix
     model.cpu()
     del model
-    return log_results
+    return log_results, val_results
 
 
 def metrics_postprocessor(cfg: EvalArgs, metrics, hide_stderr=False):
@@ -271,7 +282,7 @@ def metrics_postprocessor(cfg: EvalArgs, metrics, hide_stderr=False):
             del metrics_output[k]  
         elif k.startswith("eval/"):
             task_name = k.split("/")[1].replace(",none", "")
-            if task_name in cfg.core_metrics:
+            if cfg.core_metrics and task_name in cfg.core_metrics:
                 new_k = k.replace("eval/", "core_eval/")
                 metrics_output[new_k] = v
                 del metrics_output[k]
@@ -283,7 +294,7 @@ def metrics_postprocessor(cfg: EvalArgs, metrics, hide_stderr=False):
         if k.startswith("eval/"):
             overall_sum += v
             overall_count += 1
-    overall_core_sum = 0
+    overall_core_sum = 0    
     overall_core_count = 0
     for k, v in metrics_output.items():
         if k.startswith("core_eval/"):
@@ -291,14 +302,16 @@ def metrics_postprocessor(cfg: EvalArgs, metrics, hide_stderr=False):
             weight = cfg.core_metrics[task_name]
             overall_core_sum += v * weight
             overall_core_count += weight
-    overall_avg = overall_sum / overall_count
-    metrics_output["eval/overall_avg"] = overall_avg
-    overall_core_avg = overall_core_sum / overall_core_count
-    metrics_output["core_eval/overall_avg"] = overall_core_avg
+    if overall_count > 0:   
+        overall_avg = overall_sum / overall_count
+        metrics_output["eval/overall_avg"] = overall_avg
+    if overall_core_count > 0:
+        overall_core_avg = overall_core_sum / overall_core_count
+        metrics_output["core_eval/overall_avg"] = overall_core_avg
     return metrics_output
 
 
-def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
+def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer, train_cfg):
     
     Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
     dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
@@ -308,6 +321,10 @@ def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
 
     wrap = EvalHarnessLM(generator)
     results = simple_evaluate(wrap, **asdict(cfg.harness))
+    val_results = None        
+    if cfg.validation:
+        val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
 
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
@@ -318,9 +335,15 @@ def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
         log_results = {"eval/" + m.replace(".", "/"): v for m, v in log_results.items()}
         log_results = flatten_dict(log_results)
         log_results = metrics_postprocessor(cfg, log_results)
+        logger.info(f"All evaluation results: {log_results}")
         if cfg.global_step is not None:
             log_results["global_step"] = cfg.global_step
-        logger.info(f"All evaluation results: {log_results}")
+            if val_results is not None:
+                val_results["global_step"] = cfg.global_step
+        if val_results is not None:
+            with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
+                f.write(json.dumps(val_results))
+            logger.info(f"All validation results: {val_results}")
     else:
         log_results = None
     if cfg.metric_log_dir and get_global_rank() == 0:
@@ -337,9 +360,17 @@ def run_eval(cfg: EvalArgs, model: LMTransformer, tokenizer: Tokenizer):
             file=open(metric_log_path, mode="a"),
             flush=True,
         )
+
+        val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
+        if val_results is not None:
+            print(
+                json.dumps(timestamp | val_results),
+                file=open(val_log_path, mode="a"),
+                flush=True,
+            )
     del generator
 
-    return log_results
+    return log_results, val_results
 
 
 def main():
@@ -404,7 +435,7 @@ def main():
             logger.info(f"Waiting for ckpt.complete files to be present")
             time.sleep(1)
         # If we have all the ckpt_{rank}.complete files, then we can proceed with evaluation
-        eval_results = launch_eval(cfg)
+        eval_results, val_results = launch_eval(cfg)
         if get_global_rank() == 0:
             if cfg.terminal_eval_wandb and cfg.metric_log_dir is not None:
                 # TODO: This code will not necessarily wait for all the eval runs to finish - we are relying on the last eval run to finish last, but this is not guaranteed
@@ -415,6 +446,13 @@ def main():
                             eval_results_all.append(json.loads(line))
                 eval_results_all.append(eval_results)
 
+                val_results_all = []
+                with open(Path(cfg.metric_log_dir) / "metrics.validation.jsonl", "r") as f:
+                    for line in f:
+                        if line.strip():  # Skip empty lines
+                            val_results_all.append(json.loads(line))
+                val_results_all.append(val_results)
+
                 # does a join on the eval and train metrics
                 metrics = []
                 with open(Path(cfg.metric_log_dir) / "metrics.jsonl", "r") as f:
@@ -423,17 +461,22 @@ def main():
                             metrics.append(json.loads(line))
                 train_metrics_by_step = {m["global_step"]: m for m in metrics}
                 eval_metrics_by_step = {m["global_step"]: m for m in eval_results_all}
-                all_steps = set(train_metrics_by_step.keys()).union(set(eval_metrics_by_step.keys()))
+                val_metrics_by_step = {m["global_step"]: m for m in val_results_all}
+                all_steps = set(train_metrics_by_step.keys()).union(set(eval_metrics_by_step.keys())).union(set(val_metrics_by_step.keys()))
                 all_steps = sorted(all_steps)
                 for step in all_steps:
                     train_metrics = train_metrics_by_step.get(step)
                     eval_metrics = eval_metrics_by_step.get(step)
-                    if train_metrics and eval_metrics:
-                        metric_logger.log(train_metrics | eval_metrics, use_step=False)
-                    elif train_metrics:
-                        metric_logger.log(train_metrics, use_step=False)
-                    elif eval_metrics:
-                        metric_logger.log(eval_metrics, use_step=False)
+                    val_metrics = val_metrics_by_step.get(step)
+                    merged_metrics = {}
+                    if train_metrics:
+                        merged_metrics.update(train_metrics)
+                    if eval_metrics:
+                        merged_metrics.update(eval_metrics)
+                    if val_metrics:
+                        merged_metrics.update(val_metrics)
+                    if merged_metrics:
+                        metric_logger.log(merged_metrics, use_step=False)
             else:
                 metric_logger.log(eval_results, use_step=False)
             # Write sentinel file to mark eval completion
@@ -445,7 +488,7 @@ def main():
         if consolidated_dir.exists():
             shutil.rmtree(consolidated_dir)
 
-        if cfg.wipe_ckpt:
+        if cfg.wipe_ckpt and (not cfg.terminal_eval_wandb):
             # Remove the entire checkpoint directory
             shutil.rmtree(ckpt_dir)
 

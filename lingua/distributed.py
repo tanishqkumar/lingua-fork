@@ -138,6 +138,20 @@ def dist_mean_dict(x):
     return r
 
 
+def dist_sum(x: Union[int, float], mesh: DeviceMesh = None):
+    tensor = torch.tensor(x).cuda()
+    dist.all_reduce(tensor, op=ReduceOp.SUM, group=mesh.get_group() if mesh else None)
+    return tensor
+
+
+def dist_sum_dict(x):
+    r = dict()
+    for k in x:
+        r[k] = dist_sum(x[k])
+        r[k] = r[k].item() if (r[k].dim() == 0) else r[k].tolist()
+    return r
+
+
 @lru_cache()
 def get_is_torch_run() -> bool:
     return os.environ.get("LOCAL_RANK") is not None
