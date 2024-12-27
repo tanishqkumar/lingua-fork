@@ -1,13 +1,13 @@
 # dump_dir: !!!CHANGE_THIS!!!
 dump_base: out
 name: llama_8H200_chinchilla
-total_flops: 52.41e18 # roughly 4 hours on 8 gpus at 46.17% MFU (measured on a test run)
+total_flops: 26.205e18
 probe_freq: null
 seed: 777
-grad_acc_steps: 2
+grad_acc_steps: 1
 
 optim:
-  lr: 5e-4
+  lr: 3e-3
   weight_decay: 0.01
   warmup: 1000
   lr_min_ratio: 0.000001
@@ -23,15 +23,15 @@ distributed:
   tp_size: 1
 
 model:
-  dim: 2048
-  n_layers: 25
-  n_heads: 16
+  dim: 1536
+  n_layers: 16
+  n_heads: 48
 
 data:
   root_dir: /juice5/scr5/nlp/data/huggingface/lingua-data/
   sources:
     fineweb_edu_shuffled: 100.0
-  batch_size: 8
+  batch_size: 32
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2
@@ -40,7 +40,7 @@ data:
   add_eos: true
   tokenizer:
     name: tiktoken
-    path: /juice5/scr5/nlp/data/huggingface/lingua-data/llama_tokenizer/original/tokenizer.model
+    path: /juice5/scr5/nlp/data/huggingface/lingua-data/tokenizers/r50k_base_tokenizer/0ea1e91bbb3a60f729a8dc8f777fd2fc07cd8df4
 
 profiling:
   run: false

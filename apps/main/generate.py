@@ -318,7 +318,26 @@ class PackedCausalTransformerGenerator:
         )
         self.current_tok_id += 1
         return out
-
+    
+    def get_prompts(self, prompts):
+        # Should match the prompt processing code in generate() below. 
+        # Used to compute the lengths of each prompt that goes in for bits-per-byte
+        prompts = [
+            self.tokenizer.encode(p, add_bos=True, add_eos=False) for p in prompts
+        ]
+        # Truncate
+        max_seqlen = (
+            self.max_tokens
+            if not hasattr(self.model, "max_seqlen")
+            else self.model.max_seqlen
+        )
+        max_prompt_len = self.max_prompt_len or min(
+            max_seqlen - self.max_gen_len, self.max_tokens - self.max_gen_len
+        )
+        prompts = [p[-max_prompt_len:] for p in prompts]
+        decoded_prompts = [self.tokenizer.decode(p) for p in prompts]
+        return decoded_prompts
+    
     @torch.inference_mode()
     def generate(self, prompts):
         # Tokenize
