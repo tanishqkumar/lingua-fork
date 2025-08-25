@@ -276,11 +276,14 @@ def train(args: TrainArgs):
         if args.checkpoint.init_ckpt_path:
             logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
             load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
-            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
         else:
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
+
+        # Need to initialize RoPE embeddings outside of the "meta" device context, since the RoPE scaling logic involves .item() calls, which are not supported on meta devices.
+        model.rope_embeddings.reset_parameters()
+
         check_model_value_range(model, range=10.0, std=1.0)
 
         # log model size

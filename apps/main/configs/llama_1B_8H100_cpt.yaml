@@ -1,0 +1,121 @@
+dump_dir: out/llama_1B_8H100_cpt
+name: llama_1B_8H100_cpt
+
+# Chinchilla-optimal:
+# 1.23B parameters * 20 = 24.6B tokens
+# Batch size per GPU: 16
+# Grad accumulation steps: 4
+# Total batch size per GPU: 16 * 4 = 64
+# Total batch size: 64 * 8 gpus = 512
+# total_tokens = total_batch_size * seq_len * steps
+# 24.6B = 512 * 1024 * steps
+# steps = 24.6B / (512 * 1024) = 46921
+steps: 46921
+probe_freq: null
+seed: 777
+grad_acc_steps: 4
+
+optim:
+  lr: 5e-4
+  weight_decay: 0.01
+  warmup: 1000
+  lr_min_ratio: 0.000001
+  clip: 1.0
+
+distributed:
+  fsdp_type: full_shard
+  dp_replicate: 8
+  compile: true
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 2048
+  hidden_dim: 8192  # If specified, use exactly this value as the hidden dim for the feedforward layer
+  n_layers: 16
+  head_dim: 64
+  n_heads: 32
+  n_kv_heads: 8
+  ffn_dim_multiplier: null
+  norm_eps: 1e-05
+  weight_tying: true  # Llama 3 tie the weights, set to true by default
+  rope_theta: 500000.0
+  rope_scaling:
+    factor: 32.0
+    high_freq_factor: 4.0
+    low_freq_factor: 1.0
+    original_max_position_embeddings: 8192
+    rope_type: llama3
+
+data:
+  root_dir: /path/to/data/
+  sources:
+    dclm_baseline_1.0_10prct_shuffled: 100.0
+  batch_size: 16
+  prefetch_size: 1024
+  seq_len: 1024
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: hf
+    path: /path/to/meta-llama/Llama-3.2-1B
+
+profiling:
+  run: false
+  mem_warmup: 0
+  mem_steps: 4
+  profile_warmup: 100
+  profile_steps: 4
+
+checkpoint:
+  init_ckpt_path: /path/to/meta-llama/Llama-3.2-1B
+  dump:
+    every: 5000
+    keep: 2
+  eval:
+    every: 5000
+    keep: 2
+
+logging:
+  freq: 1
+  wandb:
+    project: lingua-ar-dclm
+    name: llama_1B_8H100_cpt
+
+async_eval_gpus: 1
+eval:
+  harness:
+    tasks:
+      - hellaswag
+      - task: boolq
+        dataset_kwargs:
+          trust_remote_code: true
+      - piqa
+      - task: social_iqa
+        dataset_kwargs:
+          trust_remote_code: true
+      - winogrande
+      - openbookqa
+      - arc_easy
+      - arc_challenge
+      - race
+      - commonsense_qa
+
+  validation: null
+  generator:
+    max_tokens: 16384
+    dtype: bf16
+
+# slurm is used for async eval
+slurm:
+  account: nlp
+  partition: miso
+  ngpu: 1
+  ncpu: 24
+  mem: 240G
+  anaconda: lingua_241216
+  time: 1440  # 24 hours
