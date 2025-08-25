@@ -12,9 +12,9 @@ First, symlink the data dir to the shared cluster data directory
 ```bash
 ln -sf /juice5/scr5/nlp/data/huggingface/lingua-data/ data
 ```
-Next, build the conda environment
+We use `uv` as our package manager. You can install dependencies with
 ```bash
-bash setup/create_env.sh
+uv sync
 ```
 
 Set up the output directory. Either use a fast devices like sphinx (Be sure to change the path to your own directory! Also, `/sphinx` requires a quota which you can get from contacting CS IT.)
@@ -29,16 +29,14 @@ mkdir -p out/
 
 Edit the config file - you should set things like the wandb project names in `apps/main/configs/llama_1B_8H200.yaml`. You can now run the sbatch example for the 1b model with 8GPUs.
 
-Here's the example for Tatsu's setup - be sure to double check your configs -  BASE_DIR, CONDA_ENV_PATH, CONDA_PATH, and the email should all be set to your own values. BASE_DIR should point to the root of your lingua-fork repo. CONDA_PATH you can get via `which conda`. 
+Here's the example for Tatsu's setup - be sure to double check your configs -  BASE_DIR and the email should all be set to your own values. 
+BASE_DIR should point to the root of your lingua-fork repo. 
 ```bash
 export BASE_DIR=/juice5/scr5/thashim/lingua-test/lingua-fork
-export CONDA_PATH=/juice5/scr5/thashim/miniconda3/bin/conda
-export CONDA_ENV_PATH=/juice5/scr5/thashim/miniconda3/envs/lingua_241127
 cd $BASE_DIR
 export CONFIG_FILE=apps/main/configs/llama_1B_8H200.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm 
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/miso_8.slurm 
 ```
-Note that CONDA_PATH and CONDA_ENV_PATH are used during async eval in `stool.py` so these should be set even if you dont need them in the sbatch script.
 
 # Other examples
 
@@ -50,25 +48,25 @@ scripts/lr_sweep.sh
 Here's an example of how to run a chinchilla optimal model.
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_8H200_chinchilla.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE -t 1:00:00 apps/main/configs/miso_8.slurm  
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE -t 1:00:00 apps/main/configs/miso_8.slurm
 ```
 
 Since lingua does precise, full-state checkpointing, you can use preemptible GPUs if you want
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_1B_48G.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/preemptible_1.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/preemptible_1.slurm
 ```
 
 You can also do multi-node, 24 GPU model training for a 1B model as an example
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_1B_24H200.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_24.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/miso_24.slurm
 ```
 
 If you want your runs to be completely deterministic, you can use the deterministic flag here. This also shows an example of using the sphinx queue instead of miso.
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_280M_48G_1.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/sphinx_1.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/sphinx_1.slurm
 ```
 
 
@@ -76,19 +74,19 @@ sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_E
 A 'fast' config that finishes in 1 hour is a 280M model which we get via
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_280M_8H200.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/miso_8.slurm
 ```
 
 If you want to try using the preemptible queue with 4 GPUs, remember to have gradient accumulation, as you see here
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_1B_48Gx4-32acc.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/preemptible_4.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/preemptible_4.slurm
 ```
 
 Finally, miso should be able to train a 7B model as well - a chinchilla optimal model takes 9.5 days on 8 GPUs and 3+ days on 24 GPUs.
 ```bash
 export CONFIG_FILE=apps/main/configs/llama_7B_8H200.yaml
-sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE apps/main/configs/miso_8.slurm
+sbatch --mail-user=thashim@stanford.edu --export=ALL,BASE_DIR,CONFIG_FILE apps/main/configs/miso_8.slurm
 ```
 
 # Data related notes
