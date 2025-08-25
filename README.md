@@ -130,7 +130,7 @@ Use of async checkpointing can have its own complications - the threads may some
 To download and shuffle a dataset on a small, fast disk (such as `/scr-ssd` on one of the Miso machines) and later transfer to a slower, larger disk (such as `/juice5b`), you can use the `setup/download_prepare_hf_data.py` script.
 
 ```bash
-python setup/download_prepare_hf_data.py dclm_baseline_1.0_10prct 999 --tmp_dir=/scr-ssd/nlp/tmp --data_dir=/scr-ssd/nlp/data --seed=42 --nchunks=8 --final_data_dir=/juice5b/scr5b/nlp/data/huggingface/lingua-data --clear_work_dir_after_transfer_to_final
+uv run python setup/download_prepare_hf_data.py dclm_baseline_1.0_10prct 999 --tmp_dir=/scr-ssd/nlp/tmp --data_dir=/scr-ssd/nlp/data --seed=42 --nchunks=8 --final_data_dir=/juice5b/scr5b/nlp/data/huggingface/lingua-data --clear_work_dir_after_transfer_to_final
 ```
 
 This will
