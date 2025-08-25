@@ -2,8 +2,6 @@
 
 # Setup common environment variables
 export BASE_DIR=/path/to/lingua-fork
-export CONDA_PATH=/path/to/miniconda3/bin/conda
-export CONDA_ENV_PATH=/path/to/miniconda3/envs/lingua_241216
 export CONFIG_FILE=apps/main/configs/llama_1B_8H100_cpt.yaml
 
 # Email user
@@ -22,7 +20,7 @@ for lr in "${learning_rates[@]}"; do
     export DUMP_DIR=$BASE_DIR/out/llama_1B_8H100_cpt_lr${lr}
     
     sbatch --mail-user=$EMAIL \
-           --export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE,EXTRA_ARGS,DUMP_DIR \
+           --export=ALL,BASE_DIR,CONFIG_FILE,EXTRA_ARGS,DUMP_DIR \
            apps/main/configs/miso_8.slurm
     sleep 1
 done

@@ -5,8 +5,6 @@ import time
 
 # Setup common environment variables
 base_dir = "/juice5/scr5/thashim/lingua-test/lingua-fork"
-conda_path = "/juice5/scr5/thashim/miniconda3/bin/conda"
-conda_env_path = "/juice5/scr5/thashim/miniconda3/envs/lingua_241127"
 config_file = "apps/main/configs/llama_8H200_chinchilla.yaml"
 email = "thashim@stanford.edu"
 
@@ -39,8 +37,6 @@ for replicate in range(replicate_count):
             env = os.environ.copy()
             env.update({
                 "BASE_DIR": base_dir,
-                "CONDA_PATH": conda_path,
-                "CONDA_ENV_PATH": conda_env_path,
                 "CONFIG_FILE": config_file,
                 "EXTRA_ARGS": extra_args,
             })
@@ -49,7 +45,7 @@ for replicate in range(replicate_count):
             cmd = [
                 "sbatch",
                 f"--mail-user={email}",
-                "--export=ALL,BASE_DIR,CONDA_PATH,CONDA_ENV_PATH,CONFIG_FILE,EXTRA_ARGS",
+                "--export=ALL,BASE_DIR,CONFIG_FILE,EXTRA_ARGS",
                 "--time=4:00:00",
                 "apps/main/configs/miso_8_silent.slurm"
             ]
