@@ -105,5 +105,4 @@ slurm:
   ncpu: 16
   constraint: "[48G|80G|141G]"
   mem: 128G
-  anaconda: lingua_241127
   time: 1440  # 24 hours
