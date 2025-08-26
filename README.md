@@ -136,6 +136,14 @@ This will
 2. Copy the shuffled data to the slow disk at `/juice5b/scr5b/nlp/data/huggingface/lingua-data/dclm_baseline_1.0_10prct_shuffled`.
 3. Clear the work directories at `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct` and `/scr-ssd/nlp/data/dclm_baseline_1.0_10prct_shuffled` if the `--clear_work_dir_after_transfer_to_final` flag is set.
 
+# Known Issues
+
+When moving from `conda` to `uv`, we changed our xformers version to 0.0.31 which throws the following error in `lingua/distributed.py`:
+```
+AttributeError: '_OpNamespace' 'xformers' object has no attribute 'efficient_attention_forward_cutlass'
+```
+We just decided to comment this out for now, since we don't think we will ever use activation recomputation with `xformers` (which is usually only used for attention at generation time).
+
 # Changelog
 
 12/17/2024
