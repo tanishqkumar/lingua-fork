@@ -117,5 +117,4 @@ slurm:
   ngpu: 1
   ncpu: 24
   mem: 240G
-  anaconda: lingua_241216
   time: 1440  # 24 hours

@@ -28,14 +28,9 @@ echo Node IP: $head_node_ip
 echo Head Node: $head_node
 echo Node list: $nodes
 
-
-# Mimic the effect of "conda init", which doesn't work for scripts
-eval "$($CONDA_PATH shell.bash hook)"
-source activate $CONDA_ENV_PATH
-
 mkdir -p out/logs
 
 export OMP_NUM_THREADS=18
 export LAUNCH_WITH="SBATCH"
 
-srun -o out/logs/log_${SLURM_JOB_ID}.out -e out/logs/log_${SLURM_JOB_ID}.err  torchrun --nnodes 2 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS
+srun -o out/logs/log_${SLURM_JOB_ID}.out -e out/logs/log_${SLURM_JOB_ID}.err uv run torchrun --nnodes 2 --rdzv_id $RANDOM --rdzv_backend c10d --rdzv_endpoint $head_node_ip:29500 --nproc_per_node=8 -m apps.main.train config=$CONFIG_FILE $EXTRA_ARGS

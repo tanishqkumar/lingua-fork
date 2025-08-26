@@ -45,7 +45,9 @@ default_no_recompute_ops = {
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.c10d_functional.reduce_scatter_tensor.default,
     torch.ops.xformers_flash.flash_fwd.default,
-    torch.ops.xformers.efficient_attention_forward_cutlass.default,
+    # TODO(@nband): encountering this error now (xformers version 0.0.31)
+    #   AttributeError: '_OpNamespace' 'xformers' object has no attribute 'efficient_attention_forward_cutlass'
+    # torch.ops.xformers.efficient_attention_forward_cutlass.default,
 }
 
 
