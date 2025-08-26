@@ -146,6 +146,10 @@ We just decided to comment this out for now, since we don't think we will ever u
 
 # Changelog
 
+8/25/2025
+- Add CPT (tested with Llama 3.2 1B), e.g., `scripts/lr_sweep_llama_1b_cpt.sh`
+- Switch from `conda` to `uv`
+
 12/17/2024
 - Added async checkpointing
 - Some chinchilla scaling recipes
