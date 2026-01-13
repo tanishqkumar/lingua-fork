@@ -1,5 +1,5 @@
-# Scaling experiment: ~30M non-embedding params (actual: 30.3M)
-# 2B tokens, 256k batch size, 12 layers fixed depth (varying width only)
+# Scaling experiment: ~30M non-embedding params (actual: 30.5M)
+# 2B tokens, 256k batch size, 6 layers fixed depth (varying width only)
 # Total tokens: 2B, steps: 7629
 
 dump_base: null  # Auto-resolved by cluster detection
@@ -24,12 +24,12 @@ distributed:
     model_dtype: bf16
 
 model:
-    dim: 448
-    n_layers: 12  # Fixed depth across all scaling experiments
-    n_heads: 7
+    dim: 640
+    n_layers: 6  # Fixed depth across all scaling experiments
+    n_heads: 10
     vocab_size: 100277  # cl100k_base (GPT-4) vocab size
-    # head_dim: 64 (448/7) - power of 2 for flex attention
-    # hidden_dim: 1280 (computed)
+    # head_dim: 64 (640/10) - power of 2 for flex attention
+    # Non-embedding params: ~30.5M
     norm_type: rmsnorm
     activation: silu
     pos_embed_type: rope
@@ -56,7 +56,7 @@ logging:
     wandb:
         project: "tanishqbot"
         entity: null
-        tags: ["scaling", "30m", "2B_tokens"]
+        tags: ["scaling", "30m", "2B_tokens", "6L"]
         group: "scaling_2b"
 
 eval: null

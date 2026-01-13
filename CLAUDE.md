@@ -267,46 +267,43 @@ tokenizer:
 
 ---
 
-## Config Example
+## Default Config (`apps/main/configs/default.yaml`)
+
+**Optimized for fast iteration**: 34M params, 1B tokens, ~11 min on 8x H100.
 
 ```yaml
 dump_base: null  # Auto-resolved by cluster detection
-name: my_experiment
-steps: 1000
+name: "default"
+steps: 4000  # 1B tokens / 256k tokens per step
 
 optim:
   optimizer: adamw
   scheduler: cosine
-  lr: 3e-4
+  lr: 3e-3  # Optimal from LR sweep
   warmup: 100
 
 model:
-  dim: 768
-  n_layers: 12
-  n_heads: 12
-  norm_type: rmsnorm
-  activation: silu
-  pos_embed_type: rope
+  dim: 832
+  n_layers: 4
+  n_heads: 13  # head_dim = 64
+  vocab_size: 100277  # cl100k_base
 
 distributed:
-  fsdp_type: full_shard
-  compile: false
+  fsdp_type: no_shard  # faster for small models
+  compile: true  # torch.compile for speed
   model_dtype: bf16
 
 data:
-  root_dir: null  # Auto-resolved by cluster detection
-  sources:
-    fineweb_edu_10bt_shuffled: 100.0
-  batch_size: 8
-  seq_len: 2048
+  batch_size: 32  # per GPU
+  seq_len: 1024
   tokenizer:
-    name: cl100k  # Fast tiktoken BPE (GPT-4 style, 100k vocab)
-
-logging:
-  freq: 10
-  wandb:
-    project: tanishqbot
+    name: cl100k
 ```
+
+**Performance** (8x H100):
+- Throughput: ~1.5M tok/s (183k/GPU)
+- MFU: ~13% (small model = memory-bandwidth bound)
+- Time: ~11 min for 1B tokens
 
 ---
 
@@ -323,14 +320,18 @@ logging:
 
 ---
 
-## Throughput Reference
+## Throughput Reference (default.yaml: 34M model, 256k batch)
 
-| Cluster | GPUs | Tokens/Step | Throughput | 500 Steps |
-|---------|------|-------------|------------|-----------|
-| research-secure | 1x H100 | 16K | ~180K tok/s | ~45s |
-| mk-turbo | 1x H100 | 16K | ~180K tok/s | ~45s |
-| sphinx | 1x A100 | 16K | ~140K tok/s | ~58s |
-| miso | 8x H100 | 131K | ~460K tok/s | ~142s |
+| Cluster | GPUs | Throughput | 1B tokens |
+|---------|------|------------|-----------|
+| mk-turbo | 8x H100 | ~1.5M tok/s | ~11 min |
+| research-secure | 8x H100 | ~1.5M tok/s | ~11 min |
+| sphinx | 8x A100 | ~1.0M tok/s | ~17 min |
+| miso | 8x H200 | ~1.8M tok/s | ~9 min |
+
+**Bad nodes** (excluded in job scripts):
+- mk-turbo-02: Slow performance (~3x slower)
+- mk-turbo-08: GPU failures
 
 ---
 

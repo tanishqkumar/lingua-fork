@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=24:00:00
+#SBATCH --time=4:00:00
 
 # Stanford sphinx cluster job script (A100s)
 # Max: 2 nodes, 8x A100 per node

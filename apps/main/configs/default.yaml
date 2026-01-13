@@ -1,0 +1,61 @@
+# Default config: 34M non-embedding params, 4 layers, 1B tokens
+# Optimized for maximum throughput on 8x H100/H200
+#
+# Model: dim=832, n_heads=13, n_layers=4 = 34.1M non-embedding params
+# Training: 1B tokens, 256k batch size, 4000 steps
+# Throughput: ~1.5M tok/s on 8x H100 (183k/GPU), MFU ~13%
+# Time: ~11 min on 8x H100
+
+dump_base: null  # Auto-resolved by cluster detection
+name: "default"
+steps: 4000  # 1B tokens / 256k tokens per step (32 batch * 8 GPU * 1024 seq)
+seed: 42
+
+optim:
+    optimizer: adamw
+    scheduler: cosine
+    lr: 3e-3  # Optimal from LR sweep (3e-4, 1e-3, 3e-3)
+    warmup: 100
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+distributed:
+    fsdp_type: no_shard  # no_shard faster for small models on single node
+    compile: true  # torch.compile speeds up training
+    model_dtype: bf16
+
+model:
+    dim: 832
+    n_layers: 4
+    n_heads: 13  # head_dim = 64
+    vocab_size: 100277  # cl100k_base
+    norm_type: rmsnorm
+    activation: silu
+    pos_embed_type: rope
+
+data:
+    root_dir: null  # Auto-resolved by cluster detection
+    sources:
+        fineweb_edu_10bt_shuffled: 100.0
+    batch_size: 32  # per GPU: 32 * 8 GPUs * 1024 seq_len = 256k tokens
+    seq_len: 1024
+    tokenizer:
+        name: cl100k
+
+checkpoint:
+    dump:
+        every: -1  # Disabled for speed
+    eval:
+        every: -1
+
+logging:
+    freq: 50
+    val_loss_every: 500
+    val_loss_batches: 10
+    wandb:
+        project: "tanishqbot"
+        entity: null
+        tags: ["default", "34m", "1B_tokens"]
+        group: "default"
+
+eval: null

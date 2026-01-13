@@ -3,13 +3,13 @@
 # Usage: ./scripts/launch_scaling.sh [cluster]
 # Cluster: research-secure (default), mk-turbo, sphinx, miso
 #
-# Models:
-#   - 30M:  dim=448,  n_layers=12, n_heads=7  (30.3M non-embed params)
-#   - 60M:  dim=640,  n_layers=12, n_heads=10 (61.0M non-embed params)
-#   - 120M: dim=896,  n_layers=12, n_heads=14 (121.1M non-embed params)
-#   - 240M: dim=1280, n_layers=12, n_heads=20 (243.8M non-embed params)
+# Models (6 layers fixed depth, width varies):
+#   - 30M:  dim=640,  n_layers=6, n_heads=10 (30.5M non-embed params)
+#   - 60M:  dim=896,  n_layers=6, n_heads=14 (60.6M non-embed params)
+#   - 120M: dim=1280, n_layers=6, n_heads=20 (121.9M non-embed params)
+#   - 240M: dim=1792, n_layers=6, n_heads=28 (234.0M non-embed params)
 #
-# Training: 2B tokens, lr=1e-3, batch=256k tokens, 7629 steps
+# Training: 2B tokens, lr=1e-3, batch=256k tokens (seq_len=1024), 7629 steps
 
 set -e
 
