@@ -23,8 +23,32 @@ echo "Start: $(date)"
 # Set cluster environment
 export LINGUA_CLUSTER=sphinx
 
+# Ensure ~/.local/bin is in PATH (for uv)
+export PATH="$HOME/.local/bin:$PATH"
+
+# WandB API key for logging
+export WANDB_API_KEY="cf165ee00e06cddeca6a6b9080ec27ca55962aad"
+
+# Create output directories
+mkdir -p /juice5b/scr5b/tanishq/lingua-out/logs
+
 # Navigate to repo
 cd ~/lingua-fork
+
+# Install uv if not available
+if ! command -v uv &> /dev/null; then
+    echo "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh || true
+    sleep 2
+fi
+
+if ! command -v uv &> /dev/null; then
+    echo "ERROR: uv not found"
+    exit 1
+fi
+
+# Sync dependencies
+uv sync
 
 # Get number of GPUs
 NGPUS=${SLURM_GPUS_ON_NODE:-8}
@@ -43,13 +67,15 @@ echo "Run Name: $RUN_NAME"
 echo "GPUs: $NGPUS"
 echo "Extra Args: $EXTRA_ARGS"
 
-# Run training with uv
+# Run training with uv (checkpointing disabled to save disk space)
 uv run torchrun \
     --nproc_per_node=$NGPUS \
     --standalone \
     -m apps.main.train \
     config=$CONFIG \
     name=$RUN_NAME \
+    checkpoint.dump.every=-1 \
+    checkpoint.eval.every=-1 \
     logging.wandb.project=tanishqbot \
     logging.wandb.name=$RUN_NAME \
     logging.wandb.tags="[stanford,sphinx,A100,$EXPERIMENT,job_$SLURM_JOB_ID]" \

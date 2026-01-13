@@ -1,0 +1,58 @@
+# Scaling experiment: ~240M non-embedding params (actual: 226.5M)
+# 2B tokens, 256k batch size, 8 layers fixed depth
+
+dump_base: null  # Auto-resolved by cluster detection
+name: "scale_240m"
+steps: 7629  # 2B tokens / 262144 tokens per step
+seed: 42
+
+optim:
+    optimizer: adamw
+    scheduler: cosine
+    lr: 1e-3  # User specified
+    warmup: 100
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+# Gradient accumulation for 256k batch
+grad_acc_steps: 32
+
+distributed:
+    fsdp_type: no_shard  # full_shard has issues with PyTorch 2.7.1
+    compile: false
+    model_dtype: bf16
+
+model:
+    dim: 1536
+    n_layers: 8
+    n_heads: 12
+    # head_dim: 128 (1536/12)
+    # hidden_dim: 4096 (computed)
+    norm_type: rmsnorm
+    activation: silu
+    pos_embed_type: rope
+
+data:
+    root_dir: null  # Auto-resolved by cluster detection
+    sources:
+        fineweb_edu_10bt_shuffled: 100.0
+    batch_size: 8  # per GPU
+    seq_len: 1024  # User specified
+    tokenizer:
+        name: bytes
+
+checkpoint:
+    dump:
+        every: 2000
+    eval:
+        every: 2000
+
+logging:
+    freq: 10
+    wandb:
+        project: "tanishqbot"
+        entity: null
+        tags: null
+        group: null
+
+eval: null
