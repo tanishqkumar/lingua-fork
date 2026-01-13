@@ -275,7 +275,7 @@ data:
   batch_size: 8
   seq_len: 2048
   tokenizer:
-    name: bytes
+    name: cl100k  # Fast tiktoken BPE (GPT-4 style, 100k vocab)
 
 logging:
   freq: 10

@@ -1,0 +1,59 @@
+# Scaling experiment: 30M, 60M, 120M, 240M models on 2B tokens
+# Non-embedding params only (width scaling, fixed depth)
+# Defaults: lr=1e-3, total_bsz=256k tokens (seq_len=1024, 256 sequences/batch)
+
+dump_base: null  # Auto-resolved by cluster
+name: "scaling"
+steps: 7629  # 2B tokens / 256k tokens per step
+seed: 42
+
+optim:
+    optimizer: adamw
+    scheduler: cosine
+    lr: 1e-3
+    warmup: 100
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+distributed:
+    fsdp_type: no_shard  # Required for PyTorch 2.7.1 (full_shard has bug)
+    compile: false
+    model_dtype: bf16
+
+# Default model config (will be overridden per-run)
+# These are the 30M defaults
+model:
+    dim: 448
+    n_layers: 12
+    n_heads: 7
+    vocab_size: 100277  # cl100k_base (GPT-4) vocab size
+    norm_type: rmsnorm
+    activation: silu
+    pos_embed_type: rope
+
+data:
+    root_dir: null  # Auto-resolved by cluster
+    sources:
+        fineweb_edu_10bt_shuffled: 100.0
+    batch_size: 32  # Per GPU, 8 GPUs -> 256 total -> 256k tokens
+    seq_len: 1024
+    tokenizer:
+        name: cl100k  # Fast tiktoken BPE (GPT-4 style)
+
+checkpoint:
+    dump:
+        every: -1  # Disabled
+    eval:
+        every: -1  # Disabled
+
+logging:
+    freq: 10
+    val_loss_every: 500  # Compute val loss every 500 steps
+    val_loss_batches: 10
+    wandb:
+        project: "tanishqbot"
+        entity: null
+        tags: null
+        group: null
+
+eval: null

@@ -726,6 +726,22 @@ def train(args: TrainArgs):
                 upload_wandb=True,
                 terminal_eval_wandb=True,
             )
+
+    # Log final timing summary
+    total_train_time = time.time() - train_start_time
+    final_metrics = {
+        "global_step": train_state.step,
+        "time/total_train_time_seconds": total_train_time,
+        "time/total_train_time_minutes": total_train_time / 60,
+        "time/total_train_time_hours": total_train_time / 3600,
+    }
+    if get_is_master():
+        metric_logger.log(final_metrics)
+        logger.info(f"=== Training Complete ===")
+        logger.info(f"Total training time: {total_train_time:.1f}s ({total_train_time/60:.1f} min)")
+        logger.info(f"Total steps: {train_state.step}")
+        logger.info(f"Tokens trained: {args.tokens:,}")
+
     gc.collect()
 
 

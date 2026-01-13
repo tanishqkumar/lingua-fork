@@ -25,6 +25,7 @@ model:
     dim: 768
     n_layers: 12
     n_heads: 12
+    vocab_size: 100277  # cl100k_base (GPT-4) vocab size
     norm_type: rmsnorm
     activation: silu
     pos_embed_type: rope
@@ -39,7 +40,7 @@ data:
     batch_size: 8
     seq_len: 2048
     tokenizer:
-        name: bytes
+        name: cl100k  # Fast tiktoken BPE (GPT-4 style)
 
 checkpoint:
     dump:

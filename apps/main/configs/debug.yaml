@@ -21,6 +21,7 @@ model:
     dim: 512
     n_layers: 4
     n_heads: 8
+    vocab_size: 100277  # cl100k_base (GPT-4) vocab size
 
 data:
     root_dir: null  # Auto-resolved by launcher
@@ -29,7 +30,7 @@ data:
     batch_size: 8
     seq_len: 2048
     tokenizer:
-        name: bytes
+        name: cl100k  # Fast tiktoken BPE (GPT-4 style)
 
 checkpoint:
     dump:

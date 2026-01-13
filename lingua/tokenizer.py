@@ -248,6 +248,41 @@ class TikTokenTokenizer(Tokenizer):
         return substrs, offsets
 
 
+class BuiltinTikTokenTokenizer(Tokenizer):
+    """TikToken tokenizer using built-in encodings like cl100k_base (GPT-4)."""
+
+    def __init__(self, encoding_name: str = "cl100k_base") -> None:
+        self.tkt_model = tiktoken.get_encoding(encoding_name)
+
+        # cl100k_base special tokens
+        self.bos_id = self.tkt_model.encode("<|endoftext|>", allowed_special="all")[0]
+        self.eos_id = self.bos_id  # Same token for BOS/EOS in GPT-style
+        self.n_words = self.tkt_model.n_vocab
+
+        logger.info(f"Loaded tiktoken {encoding_name}: #words={self.n_words}, BOS/EOS={self.bos_id}")
+
+    def encode(self, s: str, add_bos: bool, add_eos: bool):
+        assert isinstance(s, str)
+        tokens = self.tkt_model.encode(s)
+        return [self.bos_id] * add_bos + tokens + [self.eos_id] * add_eos
+
+    def decode(self, tokens: List[int]):
+        return self.tkt_model.decode(tokens)
+
+    def get_token_offsets(
+        self, text: str, tokens: Optional[List[int]] = None
+    ) -> Tuple[List[str], List[int]]:
+        if tokens is None:
+            tokens = self.tkt_model.encode(text)
+        token_bytes = self.tkt_model.decode_tokens_bytes(tokens)
+        text_len, offsets = 0, []
+        for token in token_bytes:
+            offsets.append(max(0, text_len - (0x80 <= token[0] < 0xC0)))
+            text_len += sum(1 for c in token if not 0x80 <= c < 0xC0)
+        substrs = [text[s:e] for s, e in zip(offsets, offsets[1:] + [None])]
+        return substrs, offsets
+
+
 def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
     if name == "bytes":
         return ByteTokenizer()
@@ -259,5 +294,8 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return HuggingFaceTokenizer(path)
     elif name == "tiktoken":
         return TikTokenTokenizer(path)
+    elif name == "cl100k":
+        # Fast built-in tiktoken tokenizer (GPT-4 style, 100k vocab)
+        return BuiltinTikTokenTokenizer("cl100k_base")
     else:
         raise NotImplementedError(f"{name} tokenizer type is not implemented")

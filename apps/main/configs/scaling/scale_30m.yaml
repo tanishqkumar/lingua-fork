@@ -1,5 +1,6 @@
-# Scaling experiment: ~30M non-embedding params (actual: 27.3M)
-# 2B tokens, 256k batch size, 8 layers fixed depth
+# Scaling experiment: ~30M non-embedding params (actual: 30.3M)
+# 2B tokens, 256k batch size, 12 layers fixed depth (varying width only)
+# Total tokens: 2B, steps: 7629
 
 dump_base: null  # Auto-resolved by cluster detection
 name: "scale_30m"
@@ -14,8 +15,8 @@ optim:
     lr_min_ratio: 0.1
     clip: 1.0
 
-# Gradient accumulation for 256k batch
-grad_acc_steps: 32
+# Gradient accumulation for 256k batch (with 8 GPUs: 4 * 8 * 8 * 1024 = 262144 = 256k)
+grad_acc_steps: 8
 
 distributed:
     fsdp_type: no_shard  # full_shard has issues with PyTorch 2.7.1
@@ -23,11 +24,12 @@ distributed:
     model_dtype: bf16
 
 model:
-    dim: 512
-    n_layers: 8
-    n_heads: 4
-    # head_dim: 128 (512/4)
-    # hidden_dim: 1536 (computed)
+    dim: 448
+    n_layers: 12  # Fixed depth across all scaling experiments
+    n_heads: 7
+    vocab_size: 100277  # cl100k_base (GPT-4) vocab size
+    # head_dim: 64 (448/7) - power of 2 for flex attention
+    # hidden_dim: 1280 (computed)
     norm_type: rmsnorm
     activation: silu
     pos_embed_type: rope
@@ -36,23 +38,25 @@ data:
     root_dir: null  # Auto-resolved by cluster detection
     sources:
         fineweb_edu_10bt_shuffled: 100.0
-    batch_size: 8  # per GPU
+    batch_size: 4  # per GPU (4 seqs * 8 GPUs * 8 grad_acc * 1024 seq_len = 256k tokens)
     seq_len: 1024  # User specified
     tokenizer:
-        name: bytes
+        name: cl100k  # Fast tiktoken BPE (GPT-4 style)
 
 checkpoint:
     dump:
-        every: 2000
+        every: -1  # Disable checkpointing
     eval:
-        every: 2000
+        every: -1  # Disable eval checkpoints
 
 logging:
     freq: 10
+    val_loss_every: 500  # Compute val loss every 500 steps
+    val_loss_batches: 10
     wandb:
         project: "tanishqbot"
         entity: null
-        tags: null
-        group: null
+        tags: ["scaling", "30m", "2B_tokens"]
+        group: "scaling_2b"
 
 eval: null
