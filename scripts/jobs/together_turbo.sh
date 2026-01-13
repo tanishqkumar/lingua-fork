@@ -7,8 +7,10 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
+#SBATCH --exclude=mk-turbo-08
 
 # Together AI mk-turbo cluster job script
+# NOTE: mk-turbo-08 excluded due to bad GPU (caused job 1238 to fail)
 # Max: 1 node, 8x H100 per node
 # Package manager: uv (for reproducibility)
 
