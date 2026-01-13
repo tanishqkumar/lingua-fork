@@ -22,7 +22,6 @@ from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import lr_scheduler
 
-from apps.cpt.cpt_ckpt_utils import is_llama_pretrained_ckpt
 from apps.main.eval import EvalArgs
 from apps.main.transformer import (
     LMTransformer,
@@ -57,7 +56,6 @@ from lingua.distributed import (
 from lingua.logger import init_logger
 from lingua.metrics import GPUMemoryMonitor, LoggingArgs, MetricLogger, get_num_params
 from lingua.optim import OptimArgs, build_optimizer
-from lingua.probe import AutoProbeD
 from lingua.profiling import ProfilerArgs, maybe_run_profiler
 from lingua.stool import StoolArgs, launch_job
 from lingua.tokenizer import build_tokenizer
@@ -79,7 +77,6 @@ class TrainArgs:
     grad_acc_steps: int = 1
 
     gc_collect_freq: int = 1000
-    probe_freq: Optional[int] = None
 
     # Nb optimizer steps to take. If none, compute it from the total flops
     steps: Optional[int] = None
@@ -167,9 +164,6 @@ def validate_dump_dir(args: TrainArgs):
                 .decode("ascii")
                 .strip()
             )
-            # git_diff = subprocess.check_output(['git', 'diff']).decode('ascii')
-            # diff_hash = hashlib.sha256(git_diff.encode()).hexdigest()[:8]
-            # args.name = f"{args.name}_{git_sha[:8]}_{diff_hash}"
             args.name = f"{args.name}_{git_sha[:8]}"
         except:
             logger.warning("Could not get git info")
@@ -271,23 +265,9 @@ def validate_train_args(args: TrainArgs, output_size: int):
             "Tensor parallelism has not been tested for a while, use at your own risk"
         )
 
-    assert args.probe_freq != args.profiling.mem_steps, (
-        "Don't profile during probe step"
-    )
-    assert args.probe_freq != args.profiling.profile_steps, (
-        "Don't profile during probe step"
-    )
     if args.logging.wandb is not None:
         args.logging.wandb.name = args.name
         args.logging.wandb.job_type = "train"
-
-    if args.probe_freq is not None:
-        assert args.distributed.tp_size == 1, (
-            "Probing not supported with tensor parallelism"
-        )
-        assert args.distributed.selective_activation_checkpointing is False, (
-            "Probing not supported with selective activation checkpointing"
-        )
 
 
 preemption_flag = dict(flag=False)
@@ -321,7 +301,6 @@ def launch_eval(
         launch_eval,
     )
 
-    # eval_args = dataclass_from_dict(EvalArgs, args.eval) # note - not sure why the original code had this from_dict. this causes crashes with core_eval
     eval_args = args.eval
 
     eval_args.global_step = train_state.step
@@ -336,8 +315,6 @@ def launch_eval(
     eval_args.metric_log_dir = args.dump_dir
     if args.async_eval_gpus is None:
         eval_results = launch_eval(eval_args)
-        # eval_results = run_eval(eval_args, model, tokenizer)
-        # model.train()
         if get_is_master():
             print(eval_results)
             metric_logger.log(eval_results, use_step=False)
@@ -348,7 +325,7 @@ def launch_eval(
             eval_wandb_args.name = args.logging.wandb.name + "_eval"
             eval_wandb_args.job_type = "eval"
             eval_args.logging.wandb = eval_wandb_args
-            if terminal_eval_wandb:  # for terminal eval, never resume (this should be the only run, and pass this flag to the eval script so it knows to upload everything in the run)
+            if terminal_eval_wandb:
                 eval_wandb_args.resume = "never"
                 eval_args.terminal_eval_wandb = True
         assert args.async_eval_gpus > 0
@@ -374,13 +351,13 @@ def train(args: TrainArgs):
             os.makedirs(args.dump_dir, exist_ok=True)
             dump_config(args, Path(args.dump_dir) / "config.yaml")
         init_logger(Path(args.dump_dir) / "train.log")
-        saved = False  # set saved at start, since a SIGTERM can happen at any point
+        saved = False
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
             args,
             tokenizer.n_words,
         )
-        init_signal_handler(set_preemption_flag)  # For handling preemption signals.
+        init_signal_handler(set_preemption_flag)
         if args.deterministic:
             logger.warning(
                 "Setting deterministic mode - this can have a performance impact"
@@ -398,7 +375,6 @@ def train(args: TrainArgs):
         logger.info(f"Starting job: {args.name}")
 
         # build dataloader
-        # need dp world size and rank
         dp_mesh = world_mesh["dp_replicate"]
         dp_degree = dp_mesh.size()
         dp_rank = dp_mesh.get_local_rank()
@@ -412,7 +388,6 @@ def train(args: TrainArgs):
         torch.manual_seed(args.seed)
         logger.info("Building model")
 
-        # Initializing Model in meta device allows us to initialize models much bigger than 1 gpu's memory
         with torch.device("meta"):
             model = LMTransformer(args.model)
         logger.info("Model is built !")
@@ -429,35 +404,23 @@ def train(args: TrainArgs):
             no_recompute_ops=get_no_recompute_ops(),
         )
 
-        # Once we shard the model on different gpus we can actually initialize the model
-        # First we create empty tensors of the correct shapes
         model = model.to_empty(device="cuda")
-        # Then we init the model. Please make sure this function initializes *ALL* parameters
-        # and buffers, otherwise you will have random values in the unitialized tensors
-        # which will silently fail (give nan gradients for example)
 
         if args.checkpoint.init_ckpt_path:
             logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
             load_from_checkpoint(
                 args.checkpoint.init_ckpt_path,
                 model,
-                model_key=(
-                    ""
-                    if is_llama_pretrained_ckpt(args.checkpoint.init_ckpt_path)
-                    else "model"
-                ),
-            )  # Put model_key="" if its directly the model checkpoint
+                model_key="model",
+            )
         else:
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
 
-        # Need to initialize RoPE embeddings outside of the "meta" device context, since the RoPE scaling logic involves .item() calls, which are not supported on meta devices.
         model.rope_embeddings.reset_parameters()
 
         check_model_value_range(model, range=10.0, std=1.0)
-
-        # log model size
 
         logger.info(f"Model size: {model_param_count:,} total parameters")
 
@@ -468,7 +431,6 @@ def train(args: TrainArgs):
         )
         logger.info(f"GPU memory usage: {gpu_memory_monitor}")
 
-        # build optimizer after apply parallelisms to the model
         optimizer, scheduler = build_optimizer(model, args.optim, args.steps)
         data_loader_state = init_dataloader_state_from_args(
             args.data, dp_rank, dp_degree
@@ -488,26 +450,9 @@ def train(args: TrainArgs):
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
-        print(
-            "Setting wandb id to ", train_state.wandb_id
-        )  # if checkpoint existed, this will reload the id to continue the run
+        print("Setting wandb id to ", train_state.wandb_id)
         if args.logging.wandb is not None:
             args.logging.wandb.id = train_state.wandb_id
-
-        # Either load from latest checkpoint or start from scratch
-        if args.probe_freq is not None:
-            if get_is_master():
-                os.makedirs(Path(args.dump_dir) / "probe", exist_ok=True)
-            torch.distributed.barrier()
-            probe = AutoProbeD(
-                model,
-                (
-                    Path(args.dump_dir) / "probe" / f"probe.{dp_rank}.jsonl"
-                    if (dp_rank % 128 == 0)
-                    else None
-                ),
-            )
-            probe_mod = model._orig_mod if args.distributed.compile else model
 
         gc.disable()
 
@@ -532,11 +477,8 @@ def train(args: TrainArgs):
         time_last_log = timer()
         gc.collect()
         while train_state.step < args.steps:
-            if (
-                train_state.acc_step == 0
-            ):  # we just did a gradient update or started the training loop, so reset the accumulator
+            if train_state.acc_step == 0:
                 loss_for_logging = 0
-            # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
 
@@ -544,15 +486,10 @@ def train(args: TrainArgs):
             curr_lr = float(optimizer.param_groups[0]["lr"])
             data_load_start = timer()
             batch, train_state.data_loader_state = next(data_loader)
-            batch = torch.tensor(
-                batch,
-                dtype=torch.long,
-            )
+            batch = torch.tensor(batch, dtype=torch.long)
 
             if every_n_steps(train_state, args.gc_collect_freq, acc_step=0):
                 logger.info("garbage collection")
-                # we do garbage collection manually otherwise different processes
-                # run the GC at different times so they slow down the whole pipeline
                 gc.collect()
 
             input_ids = batch[:, :, 0].cuda()
@@ -567,50 +504,10 @@ def train(args: TrainArgs):
             end_timer = torch.cuda.Event(enable_timing=True)
             start_timer.record()
 
-            # This is an automatic probe that will compute statistics
-            # of all linears' inputs, weights and outputs
-            # along with attention logits and entropy
-            # both in forward and backward pass
-            if (args.probe_freq is not None) and every_n_steps(
-                train_state, args.probe_freq, acc_step=1 % args.grad_acc_steps
-            ):
-                # Here we do a fake forward and backward pass on a smaller
-                # batch size to avoid OOM
-                # This assumes the model has no stateful layers (batch norm..)
-                assert next(probe_mod.parameters()).grad is None, (
-                    "Can't probe model if grads are not reset"
-                )
-
-                with probe:
-                    probe.metadata = {
-                        "it": train_state.step,
-                        "global_step": train_state.step,
-                        "loop": "lingua",
-                    }
-                    # Non compiled model uses roughly 2x memory in our exps
-                    # So we divide bsz by 2 or seqlen by 2
-                    probe_bsz = max(1, bsz // 2)
-                    probe_seq = seqlen if (bsz // 2 >= 1) else (seqlen // 2)
-                    probe_loss = probe_mod(
-                        input_ids[:probe_bsz, :probe_seq],
-                        labels[:probe_bsz, :probe_seq],
-                    )
-                    probe_loss.backward()
-                    # We zero grads to cancel this fake step
-                    optimizer.zero_grad()
-
-                assert next(probe_mod.parameters()).grad is None, (
-                    "Probe model shouldn't have grads at this point"
-                )
-
             loss = model(input_ids, labels)
 
-            # We scale loss with grad_acc_steps so the gradient is the same
-            # regardless of grad_acc_steps
             loss = loss / args.grad_acc_steps
-            # backward on scaled loss to create scaled gradients
             loss.backward()
-            # track gradient accumulated loss for logging. when acc_step=1, we reset the accumulator since this is the first step.
             loss_for_logging += loss.item()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -628,15 +525,12 @@ def train(args: TrainArgs):
                 optimizer.zero_grad()
                 train_state.step += 1
 
-            # updates the scale for next iteration
-            # training iteration complete
             end_timer.record()
 
             torch.cuda.synchronize()
 
             curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3, 4)
 
-            # if profiler is active
             if torch_profiler:
                 xformers.profiler.step()
 
@@ -659,9 +553,6 @@ def train(args: TrainArgs):
                     total_acc_steps * args.data.batch_size * args.data.seq_len
                 )
                 total_tokens = dp_degree * tokens_per_gpu
-                # This is an estimate and the correct values may change
-                # if you change the architecture
-                # Use xformer's analyze profile trace to get actual measurement
                 FLOPS = (
                     get_num_flop_per_token(
                         model_param_count - args.model.vocab_size * args.model.dim,
@@ -671,7 +562,7 @@ def train(args: TrainArgs):
                     )
                     * wps
                 )
-                H200_FLOPS = 989e12  # 'book flops' for H200
+                H200_FLOPS = 989e12
                 H200_MFU = FLOPS / H200_FLOPS
                 elapsed_time = time.time() - train_start_time
                 total_time_estimate = elapsed_time / train_state.step * args.steps
@@ -752,7 +643,7 @@ def train(args: TrainArgs):
                 )
 
             if preemption_flag["flag"]:
-                checkpoint.wipe_shm()  # terminate any async save processes and remove shm folders
+                checkpoint.wipe_shm()
                 if not saved:
                     checkpoint.save(
                         model,
@@ -826,7 +717,6 @@ def main():
     """
     cli_args = OmegaConf.from_cli()
     file_cfg = OmegaConf.load(cli_args.config)
-    # We remove 'config' attribute from config as the underlying DataClass does not have it
     del cli_args.config
 
     default_cfg = OmegaConf.structured(TrainArgs())

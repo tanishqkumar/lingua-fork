@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 from functools import partial
 import math
-
 import logging
+from typing import Callable, Dict, Type
+
 from torch import nn
-from torch.optim import AdamW, lr_scheduler
+from torch.optim import AdamW, SGD, lr_scheduler
+from torch.optim.optimizer import Optimizer
 
 logger = logging.getLogger()
 
@@ -20,6 +22,10 @@ class OptimArgs:
     beta2: float = 0.95
     clip: float = 1.0
 
+    # Optimizer selection
+    optimizer: str = "adamw"
+
+    # Scheduler selection
     scheduler: str = "cosine"
     warmup: int = 2000
     lr_min_ratio: float = 0.1
@@ -29,6 +35,14 @@ class OptimArgs:
     decay_fraction: float = 0.1
 
     exp_factor: float = 0.5
+
+
+# =============================================================================
+# SCHEDULER REGISTRY
+# =============================================================================
+
+def lr_constant(step: int) -> float:
+    return 1.0
 
 
 def lr_linear(step: int, warmup: int, n_steps: int, min_ratio: float) -> float:
@@ -70,6 +84,7 @@ def lr_cosine(
         lr = min_ratio
     return lr
 
+
 def lr_wsd(
     step: int,
     warmup: int,
@@ -85,17 +100,12 @@ def lr_wsd(
     cycle_num = step // int(n_steps * cycle_length) + 1
     curr_n_steps = int(n_steps * cycle_length) * cycle_num
     decay_length = int(curr_n_steps * decay_fraction)
-    
+
     if step < warmup:
         lr = float(step) / warmup
     elif step <= curr_n_steps - decay_length:
         lr = 1.0
     elif step > curr_n_steps - decay_length and step <= curr_n_steps:
-        # Linear interpolation gives similar results
-        # slope = -(1.0 - min_ratio) / decay_length
-        # intercept = min_ratio + ((1.0 - min_ratio) * curr_n_steps) / decay_length
-        # lr = slope * step + intercept
-
         step = step - (curr_n_steps - decay_length)
         lr = 1/((step/curr_n_steps)*(1/min_ratio) + (1 - step/curr_n_steps))
     else:
@@ -104,60 +114,103 @@ def lr_wsd(
     return lr
 
 
-def build_lr_fn(args: OptimArgs, n_steps: int):
-    if args.scheduler == "constant":
-        lr_fn = lambda x: 1.0
-    elif args.scheduler == "linear":
-        lr_fn = partial(
-            lr_linear, warmup=args.warmup, n_steps=n_steps, min_ratio=args.lr_min_ratio
-        )
-    elif args.scheduler == "inv_sqrt":
-        lr_fn = partial(
-            lr_inv_sqrt,
-            warmup=args.warmup,
-            exp_factor=args.exp_factor,
-            min_ratio=args.lr_min_ratio,
-        )
-    elif args.scheduler == "cosine":
-        lr_fn = partial(
-            lr_cosine,
-            warmup=args.warmup,
-            n_steps=n_steps,
-            cycle_length=args.cycle_length,
-            theta=args.cosine_theta,
-            min_ratio=args.lr_min_ratio,
-        )
-    elif args.scheduler == "wsd":
-        assert args.decay_fraction < args.cycle_length
-        lr_fn = partial(
-            lr_wsd,
-            warmup=args.warmup,
-            n_steps=n_steps,
-            decay_fraction=args.decay_fraction,
-            cycle_length=args.cycle_length,
-            min_ratio=args.lr_min_ratio,
-        )
-    else:
-        raise NotImplementedError(f"Unknown scheduler: {args.scheduler}")
-    return lr_fn
+# Registry mapping scheduler names to builder functions
+SCHEDULER_REGISTRY: Dict[str, Callable] = {
+    "constant": lambda args, n_steps: lr_constant,
+    "linear": lambda args, n_steps: partial(
+        lr_linear, warmup=args.warmup, n_steps=n_steps, min_ratio=args.lr_min_ratio
+    ),
+    "inv_sqrt": lambda args, n_steps: partial(
+        lr_inv_sqrt,
+        warmup=args.warmup,
+        exp_factor=args.exp_factor,
+        min_ratio=args.lr_min_ratio,
+    ),
+    "cosine": lambda args, n_steps: partial(
+        lr_cosine,
+        warmup=args.warmup,
+        n_steps=n_steps,
+        cycle_length=args.cycle_length,
+        theta=args.cosine_theta,
+        min_ratio=args.lr_min_ratio,
+    ),
+    "wsd": lambda args, n_steps: partial(
+        lr_wsd,
+        warmup=args.warmup,
+        n_steps=n_steps,
+        decay_fraction=args.decay_fraction,
+        cycle_length=args.cycle_length,
+        min_ratio=args.lr_min_ratio,
+    ),
+}
 
 
-def build_optimizer(model: nn.Module, args: OptimArgs, n_steps: int):
-    logger.info("Starting build of optimizer...")
-    optimizer = AdamW(
+def register_scheduler(name: str, builder: Callable):
+    """Register a new scheduler builder function."""
+    SCHEDULER_REGISTRY[name] = builder
+
+
+# =============================================================================
+# OPTIMIZER REGISTRY
+# =============================================================================
+
+def build_adamw(model: nn.Module, args: OptimArgs) -> Optimizer:
+    return AdamW(
         model.parameters(),
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         weight_decay=args.weight_decay,
         eps=args.epsilon,
-        fused=True,  # Faster optim.step but can throw errors
+        fused=True,
     )
+
+
+def build_sgd(model: nn.Module, args: OptimArgs) -> Optimizer:
+    return SGD(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        momentum=args.beta1,
+    )
+
+
+# Registry mapping optimizer names to builder functions
+OPTIMIZER_REGISTRY: Dict[str, Callable[[nn.Module, OptimArgs], Optimizer]] = {
+    "adamw": build_adamw,
+    "sgd": build_sgd,
+}
+
+
+def register_optimizer(name: str, builder: Callable[[nn.Module, OptimArgs], Optimizer]):
+    """Register a new optimizer builder function."""
+    OPTIMIZER_REGISTRY[name] = builder
+
+
+# =============================================================================
+# BUILD FUNCTIONS
+# =============================================================================
+
+def build_lr_fn(args: OptimArgs, n_steps: int):
+    if args.scheduler not in SCHEDULER_REGISTRY:
+        raise NotImplementedError(f"Unknown scheduler: {args.scheduler}. Available: {list(SCHEDULER_REGISTRY.keys())}")
+
+    if args.scheduler == "wsd":
+        assert args.decay_fraction < args.cycle_length
+
+    return SCHEDULER_REGISTRY[args.scheduler](args, n_steps)
+
+
+def build_optimizer(model: nn.Module, args: OptimArgs, n_steps: int):
+    logger.info("Starting build of optimizer...")
+
+    if args.optimizer not in OPTIMIZER_REGISTRY:
+        raise NotImplementedError(f"Unknown optimizer: {args.optimizer}. Available: {list(OPTIMIZER_REGISTRY.keys())}")
+
+    optimizer = OPTIMIZER_REGISTRY[args.optimizer](model, args)
 
     # scheduler
     lr_fn = build_lr_fn(args, n_steps)
-    scheduler = lr_scheduler.LambdaLR(
-        optimizer, lr_fn
-    )  # lr_scheduler.LambdaLR(optimizer, lr_fn)
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_fn)
 
     logger.info("Done with build of optimizer.")
     return optimizer, scheduler
