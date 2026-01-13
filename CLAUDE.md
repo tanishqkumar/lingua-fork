@@ -240,6 +240,31 @@ from lingua.transformer import ACTIVATION_REGISTRY, register_activation
 # Available: "silu", "gelu", "relu", "tanh", "sigmoid"
 ```
 
+**Tokenizers** (`lingua/tokenizer.py`):
+```yaml
+tokenizer:
+  name: cl100k  # RECOMMENDED: Fast tiktoken BPE (GPT-4 style)
+  # Other options:
+  # name: bytes           # 258 vocab, unrealistically low loss (~1.0-1.5)
+  # name: hf              # HuggingFace (slow for Llama)
+  #   path: meta-llama/Llama-3.2-1B
+  # name: tiktoken        # Custom tiktoken file
+  #   path: path/to/file.tiktoken
+  # name: sp              # SentencePiece
+  #   path: path/to/model.model
+```
+
+| Tokenizer | Vocab Size | Expected Loss | Speed | Notes |
+|-----------|------------|---------------|-------|-------|
+| **cl100k** | 100,277 | 3.0-4.0 | Fast | GPT-4 style, recommended |
+| bytes | 258 | 1.0-1.5 | Fast | Misleadingly low loss |
+| hf (Llama) | 128,256 | 3.0-4.0 | Slow | use_fast=False by default |
+
+**Important**: Always set `model.vocab_size` to match your tokenizer!
+- cl100k: `vocab_size: 100277`
+- bytes: `vocab_size: 258` (or omit, auto-detected)
+- Llama 3: `vocab_size: 128256`
+
 ---
 
 ## Config Example
