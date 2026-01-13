@@ -49,6 +49,10 @@ class LoggingArgs:
     freq: int = 10  # Log every freq optimizer steps
     acc_freq: Optional[int] = None  # Log every acc_freq gradient accumulation steps
 
+    # Validation loss settings
+    val_loss_every: int = 100  # Compute val loss every N steps (0 to disable)
+    val_loss_batches: int = 10  # Number of batches for val loss computation
+
     wandb: Optional[WandbArgs] = None
 
 

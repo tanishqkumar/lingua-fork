@@ -5,9 +5,9 @@
 | Cluster | SSH Host | Environment | Data Path | Max Nodes | GPU |
 |---------|----------|-------------|-----------|-----------|-----|
 | **research-secure** | `research-secure-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
-| **mk-turbo** | `mk-turbo-hn` | `uv` | `/data/tkumar/datasets` | 1 | 8x H100 |
+| **mk-turbo** | `mk-turbo-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
 | **sphinx** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 2 | 8x A100 |
-| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 8x H100 |
+| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 8x H200 |
 
 **Priority Order**: research-secure > mk-turbo > sphinx > miso
 
@@ -292,4 +292,45 @@ export LINGUA_CLUSTER=research-secure  # or mk-turbo, sphinx, miso
 
 **mk-turbo /data not found**: The `/data` filesystem is only mounted on compute nodes, not the login node. Use `srun` to access it.
 
+**mk-turbo disk full (58GB root partition)**: The login node has a small root partition. Always symlink .venv to /data:
+```bash
+mkdir -p /data/tkumar/lingua-venv
+ln -sf /data/tkumar/lingua-venv .venv
+uv sync
+```
+
+**FSDP full_shard RuntimeError** (`get_group_info: no group info`): PyTorch 2.7.1 has a bug with `full_shard` FSDP. Use `fsdp_type: no_shard` in configs.
+
+**Checkpoint spam even with every=-1**: Fixed in train.py - Python `x % -1 == 0` is always True. The `every_n_steps` function now returns False for freq <= 0.
+
+**wandb "api_key not configured (no-tty)"**: Job scripts need:
+```bash
+export WANDB_API_KEY="your_api_key_here"
+```
+
 **Stanford auth**: Use password `december1972` for tanishq@sc.stanford.edu
+
+---
+
+## Logging Configuration
+
+**Training loss**: Logged every `logging.freq` steps as `loss/out`
+
+**Validation loss**: Computed every `logging.val_loss_every` steps (default: 100) over `logging.val_loss_batches` batches (default: 10). Logged as `loss/val`.
+
+**Initial loss**: Computed before training starts at step 0, logged as `loss/init`. This gives you the loss at initialization.
+
+To disable validation loss:
+```yaml
+logging:
+  val_loss_every: 0  # 0 disables validation loss
+```
+
+To disable checkpointing entirely:
+```yaml
+checkpoint:
+  dump:
+    every: -1  # -1 disables checkpoint saving
+  eval:
+    every: -1  # -1 disables eval checkpoints
+```

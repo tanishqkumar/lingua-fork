@@ -281,12 +281,38 @@ def set_preemption_flag(signum, frame):
 
 
 def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
+    # freq <= 0 means disabled (never trigger)
+    if freq <= 0:
+        return False
     test = train_state.step % freq == 0
     if acc_step is not None:
         test = test and (train_state.acc_step == acc_step)
     elif acc_freq is not None:
         test = test and ((train_state.acc_step % acc_freq) == 0)
     return test
+
+
+def compute_val_loss(model, data_loader, data_loader_state, num_batches: int):
+    """Compute validation loss over num_batches without gradients.
+
+    Uses the same data loader but doesn't update training state.
+    Returns average loss and the data_loader_state for continuation.
+    """
+    model.eval()
+    total_loss = 0.0
+
+    with torch.no_grad():
+        for _ in range(num_batches):
+            batch, data_loader_state = next(data_loader)
+            batch = torch.tensor(batch, dtype=torch.long)
+            input_ids = batch[:, :, 0].cuda()
+            labels = batch[:, :, 1].cuda()
+            loss = model(input_ids, labels)
+            total_loss += loss.item()
+
+    model.train()
+    avg_loss = total_loss / num_batches
+    return avg_loss, data_loader_state
 
 
 def launch_eval(
@@ -477,6 +503,21 @@ def train(args: TrainArgs):
         loss_for_logging = 0
         time_last_log = timer()
         gc.collect()
+
+        # Compute initial loss before training starts (loss at init)
+        if train_state.step == 0:
+            init_loss, train_state.data_loader_state = compute_val_loss(
+                model, data_loader, train_state.data_loader_state,
+                num_batches=args.logging.val_loss_batches
+            )
+            init_metrics = {
+                "global_step": 0,
+                "loss/init": init_loss,
+            }
+            if get_is_master():
+                metric_logger.log(init_metrics)
+            logger.info(f"Initial loss (before training): {init_loss:.4f}")
+
         while train_state.step < args.steps:
             if train_state.acc_step == 0:
                 loss_for_logging = 0
@@ -598,16 +639,27 @@ def train(args: TrainArgs):
                 to_sync["loss/out"] = loss_for_logging
                 metrics.update(dist_mean_dict(to_sync))
 
+                # Compute validation loss every val_loss_every steps
+                val_loss = None
+                if args.logging.val_loss_every > 0 and train_state.step % args.logging.val_loss_every == 0:
+                    val_loss, train_state.data_loader_state = compute_val_loss(
+                        model, data_loader, train_state.data_loader_state,
+                        num_batches=args.logging.val_loss_batches
+                    )
+                    metrics["loss/val"] = val_loss
+
                 if get_is_master():
                     metric_logger.log(metrics)
 
                 gpu_memory_monitor.reset_peak_stats()
                 nwords_since_last_log = 0
                 time_last_log = timer()
+                val_loss_str = f"  val: {val_loss:.4f}" if val_loss is not None else ""
                 logger.info(
                     f"step: {train_state.step}"
                     f"  acc: {train_state.acc_step}"
                     f"  loss: {round(loss_for_logging, 4):>7}"
+                    f"{val_loss_str}"
                     f"  grad: {grad_norm:.2e}"
                     f"  flops: {FLOPS:.2e}"
                     f"  wps: {wps:.2e}"
