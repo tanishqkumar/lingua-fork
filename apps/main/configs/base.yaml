@@ -1,0 +1,59 @@
+# Base config template - paths are auto-resolved based on cluster
+# Use this as a starting point for experiments
+
+# These will be auto-resolved by the launcher based on cluster
+# You can override with explicit paths if needed
+dump_base: null  # Auto-resolved: /data/tkumar/lingua-out (together) or /juice5b/scr5b/tanishq/lingua-out (stanford)
+name: "experiment"
+steps: 1000
+seed: 42
+
+optim:
+    optimizer: adamw
+    scheduler: cosine
+    lr: 3e-4
+    warmup: 100
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+distributed:
+    fsdp_type: full_shard
+    compile: false
+    model_dtype: bf16
+
+model:
+    dim: 768
+    n_layers: 12
+    n_heads: 12
+    norm_type: rmsnorm
+    activation: silu
+    pos_embed_type: rope
+
+data:
+    # Auto-resolved based on cluster:
+    # Together: /data/tkumar/datasets
+    # Stanford: /juice5/scr5/nlp/data/huggingface/lingua-data
+    root_dir: null
+    sources:
+        fineweb_edu_10bt_shuffled: 100.0
+    batch_size: 8
+    seq_len: 2048
+    tokenizer:
+        name: bytes
+
+checkpoint:
+    dump:
+        every: 5000
+    eval:
+        every: 5000
+
+logging:
+    freq: 10
+    wandb:
+        project: "lingua-fork"
+        entity: null  # Set your wandb entity
+        # tags and group are auto-set by launcher
+        tags: null
+        group: null
+
+eval: null

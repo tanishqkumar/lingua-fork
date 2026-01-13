@@ -1,6 +1,7 @@
-# Template config for quick debugging
+# Quick debug config - works on all clusters
+# Paths are auto-resolved by the launcher based on detected cluster
 
-dump_dir: /juice5b/scr5b/tanishq/lingua-out/debug
+dump_base: null  # Auto-resolved by launcher
 name: "debug"
 steps: 100
 seed: 777
@@ -22,7 +23,7 @@ model:
     n_heads: 8
 
 data:
-    root_dir: /juice5/scr5/nlp/data/huggingface/lingua-data/
+    root_dir: null  # Auto-resolved by launcher
     sources:
         fineweb_edu_10bt_shuffled: 100.0
     batch_size: 8
@@ -38,5 +39,6 @@ checkpoint:
 
 logging:
     freq: 10
+    wandb: null  # Set by launcher or override with logging.wandb.project=xxx
 
 eval: null

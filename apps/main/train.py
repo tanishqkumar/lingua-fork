@@ -59,6 +59,7 @@ from lingua.optim import OptimArgs, build_optimizer
 from lingua.profiling import ProfilerArgs, maybe_run_profiler
 from lingua.stool import StoolArgs, launch_job
 from lingua.tokenizer import build_tokenizer
+from lingua.cluster import detect_cluster, get_cluster_config, print_cluster_info
 
 logger = logging.getLogger()
 
@@ -723,7 +724,47 @@ def main():
     cfg = OmegaConf.merge(default_cfg, file_cfg, cli_args)
     cfg = OmegaConf.to_object(cfg)
 
+    # Auto-resolve cluster-specific paths if not explicitly set
+    cfg = resolve_cluster_paths(cfg)
+
     train(cfg)
+
+
+def resolve_cluster_paths(args: TrainArgs) -> TrainArgs:
+    """Auto-resolve data and dump paths based on detected cluster."""
+    try:
+        cluster_name = detect_cluster()
+        if cluster_name is None:
+            logger.warning("Could not detect cluster - using config paths as-is")
+            return args
+
+        config = get_cluster_config(cluster_name)
+        print_cluster_info(cluster_name)
+
+        # Resolve data.root_dir if not set
+        if args.data.root_dir is None:
+            args.data.root_dir = config.data_root
+            logger.info(f"Auto-resolved data.root_dir to: {args.data.root_dir}")
+
+        # Resolve dump_base if not set
+        if args.dump_base is None and args.dump_dir is None:
+            args.dump_base = config.dump_base
+            logger.info(f"Auto-resolved dump_base to: {args.dump_base}")
+
+        # Add cluster info to wandb tags if wandb is enabled
+        if args.logging.wandb is not None:
+            if args.logging.wandb.tags is None:
+                args.logging.wandb.tags = []
+            # Add cluster tags if not already present
+            cluster_tags = [config.cluster, config.name, config.gpu_type]
+            for tag in cluster_tags:
+                if tag not in args.logging.wandb.tags:
+                    args.logging.wandb.tags.append(tag)
+
+    except Exception as e:
+        logger.warning(f"Cluster path resolution failed: {e}")
+
+    return args
 
 
 if __name__ == "__main__":
