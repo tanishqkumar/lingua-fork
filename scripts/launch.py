@@ -22,12 +22,12 @@ import subprocess
 import sys
 import argparse
 
-# Cluster configs in priority order: (name, ssh_host, ssh_pass, partition, job_script)
+# Cluster configs in priority order: (name, ssh_host, ssh_pass, partition, job_script, max_nodes)
 CLUSTERS = [
-    ("research-secure", "research-secure-hn", None, "batch", "scripts/jobs/together_secure.sh"),
-    ("mk-turbo", "mk-turbo-hn", None, "batch", "scripts/jobs/together_turbo.sh"),
-    ("sphinx", "tanishq@sc.stanford.edu", "december1972", "sphinx", "scripts/jobs/stanford_sphinx.sh"),
-    ("miso", "tanishq@sc.stanford.edu", "december1972", "miso", "scripts/jobs/stanford_miso.sh"),
+    ("mk-turbo", "mk-turbo-hn", None, "batch", "scripts/jobs/together_turbo.sh", 1),
+    ("research-secure", "research-secure-hn", None, "batch", "scripts/jobs/together_secure.sh", 1),
+    ("sphinx", "tanishq@sc.stanford.edu", "december1972", "sphinx", "scripts/jobs/stanford_sphinx.sh", 2),
+    ("miso", "tanishq@sc.stanford.edu", "december1972", "miso", "scripts/jobs/stanford_miso.sh", 1),
 ]
 
 
@@ -106,17 +106,19 @@ def main():
     selected = None
     results = []
 
-    for name, host, password, partition, job_script in CLUSTERS:
+    for name, host, password, partition, job_script, max_nodes in CLUSTERS:
         # If user specified a cluster, only check that one
         if args.cluster and args.cluster != name:
             continue
 
         idle = check_idle_nodes(host, partition, password)
+        # Cap idle count by max_nodes we're willing to use
+        idle = min(idle, max_nodes)
         status = f"{idle} idle node(s)" if idle > 0 else "no idle nodes"
 
         is_selected = False
         if idle > 0 and selected is None:
-            selected = (name, host, password, partition, job_script)
+            selected = (name, host, password, partition, job_script, max_nodes)
             is_selected = True
 
         results.append((name, idle, is_selected))
@@ -131,9 +133,9 @@ def main():
     if selected is None:
         if args.cluster:
             # User forced a specific cluster, use it even if busy
-            for name, host, password, partition, job_script in CLUSTERS:
+            for name, host, password, partition, job_script, max_nodes in CLUSTERS:
                 if name == args.cluster:
-                    selected = (name, host, password, partition, job_script)
+                    selected = (name, host, password, partition, job_script, max_nodes)
                     print(f"Warning: {args.cluster} has no idle nodes, submitting anyway...")
                     break
         else:
@@ -141,7 +143,7 @@ def main():
             print("Warning: No idle nodes found, using priority order...")
             selected = CLUSTERS[0]  # First in priority order
 
-    name, host, password, partition, job_script = selected
+    name, host, password, partition, job_script, max_nodes = selected
 
     if args.dry_run:
         print(f"Would submit to: {name}")
