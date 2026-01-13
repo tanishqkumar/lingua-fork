@@ -491,7 +491,8 @@ def train(args: TrainArgs):
         print(
             "Setting wandb id to ", train_state.wandb_id
         )  # if checkpoint existed, this will reload the id to continue the run
-        args.logging.wandb.id = train_state.wandb_id
+        if args.logging.wandb is not None:
+            args.logging.wandb.id = train_state.wandb_id
 
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
@@ -772,14 +773,15 @@ def train(args: TrainArgs):
             device_mesh=world_mesh,
             force_sync_save=True,
         )
-        launch_eval(
-            args,
-            train_state,
-            checkpoint,
-            metric_logger,
-            upload_wandb=True,
-            terminal_eval_wandb=True,
-        )
+        if args.eval is not None:
+            launch_eval(
+                args,
+                train_state,
+                checkpoint,
+                metric_logger,
+                upload_wandb=True,
+                terminal_eval_wandb=True,
+            )
     gc.collect()
 
 

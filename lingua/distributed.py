@@ -254,9 +254,7 @@ def setup_torch_distributed(dist_args):
         - global_rank
         - world_size
     """
-    mp.set_start_method(dist_args.spawn_method)
-    with mp.Manager():
-        pass
+    # PATCHED: Removed mp.set_start_method and mp.Manager to fix SLURM hang
 
     local_rank = get_local_rank()
 
