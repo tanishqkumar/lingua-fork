@@ -17,11 +17,12 @@ class ClusterConfig:
     cluster: str                 # e.g., "together", "stanford"
     data_root: str               # Root directory for datasets
     dump_base: str               # Base directory for outputs
-    max_nodes: int               # Maximum nodes we can use
+    max_nodes: int               # Maximum nodes we want to use (not total available)
     gpus_per_node: int           # GPUs per node
     gpu_type: str                # e.g., "H100", "H200", "A100"
     partition: Optional[str]     # SLURM partition name (if applicable)
     account: Optional[str]       # SLURM account (if applicable)
+    grad_acc_multiplier: int = 1 # Multiply grad_acc_steps by this (2x for A100)
 
 
 # Cluster configurations
@@ -60,15 +61,16 @@ CLUSTER_CONFIGS: Dict[str, ClusterConfig] = {
         gpu_type="A100",
         partition="sphinx",
         account="nlp",
+        grad_acc_multiplier=2,  # A100 has less memory, double grad_acc and halve batch_size
     ),
     "miso": ClusterConfig(
         name="miso",
         cluster="stanford",
         data_root="/juice5/scr5/nlp/data/huggingface/lingua-data",
         dump_base="/juice5b/scr5b/tanishq/lingua-out",
-        max_nodes=2,
+        max_nodes=1,
         gpus_per_node=8,
-        gpu_type="H200",
+        gpu_type="H100",
         partition="miso",
         account="nlp",
     ),

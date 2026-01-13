@@ -9,8 +9,8 @@
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
 
-# Stanford miso cluster job script (H200s)
-# Max: 2 nodes, 8x H200 per node
+# Stanford miso cluster job script (H100s)
+# Max: 1 node, 8x H100 per node
 # NOTE: miso requires using all 8 GPUs per node
 
 set -e
@@ -46,7 +46,7 @@ uv run torchrun \
     -m apps.main.train \
     config=$CONFIG \
     logging.wandb.project=lingua-fork \
-    logging.wandb.tags="[stanford,miso,H200,$EXPERIMENT]" \
+    logging.wandb.tags="[stanford,miso,H100,$EXPERIMENT]" \
     logging.wandb.group="$EXPERIMENT/stanford/miso" \
     $EXTRA_ARGS
 

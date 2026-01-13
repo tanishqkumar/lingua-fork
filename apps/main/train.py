@@ -731,7 +731,11 @@ def main():
 
 
 def resolve_cluster_paths(args: TrainArgs) -> TrainArgs:
-    """Auto-resolve data and dump paths based on detected cluster."""
+    """Auto-resolve data and dump paths based on detected cluster.
+
+    Also adjusts batch_size and grad_acc_steps for A100 GPUs to maintain
+    equivalent effective batch size with lower memory usage.
+    """
     try:
         cluster_name = detect_cluster()
         if cluster_name is None:
@@ -750,6 +754,19 @@ def resolve_cluster_paths(args: TrainArgs) -> TrainArgs:
         if args.dump_base is None and args.dump_dir is None:
             args.dump_base = config.dump_base
             logger.info(f"Auto-resolved dump_base to: {args.dump_base}")
+
+        # Adjust batch_size and grad_acc_steps for A100 (less memory than H100/H200)
+        # This keeps effective batch size the same: batch_size * grad_acc_steps = constant
+        if config.grad_acc_multiplier > 1:
+            original_batch = args.data.batch_size
+            original_acc = args.grad_acc_steps
+            args.data.batch_size = args.data.batch_size // config.grad_acc_multiplier
+            args.grad_acc_steps = args.grad_acc_steps * config.grad_acc_multiplier
+            logger.info(
+                f"Adjusted for {config.gpu_type}: batch_size {original_batch} -> {args.data.batch_size}, "
+                f"grad_acc_steps {original_acc} -> {args.grad_acc_steps} "
+                f"(effective batch unchanged: {original_batch * original_acc})"
+            )
 
         # Add cluster info to wandb tags if wandb is enabled
         if args.logging.wandb is not None:
