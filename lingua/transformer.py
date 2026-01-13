@@ -262,15 +262,19 @@ class ALiBiEmbedding(nn.Module):
 
     def reset_parameters(self):
         """Precompute the ALiBi bias matrix."""
-        # Create distance matrix: distance[i, j] = |i - j|
-        positions = torch.arange(self.max_seqlen)
+        # Create distance matrix on the same device as self.bias
+        device = self.bias.device
+        dtype = self.bias.dtype
+
+        positions = torch.arange(self.max_seqlen, device=device)
         # For causal attention, we use: bias[i, j] = -m * (i - j) for j <= i
         # This penalizes attending to tokens further in the past
         distance = positions.unsqueeze(0) - positions.unsqueeze(1)  # [max_seqlen, max_seqlen]
 
         # bias[i, j, h] = -slopes[h] * distance[i, j]
         # Shape: [max_seqlen, max_seqlen, n_heads]
-        self.bias[...] = -distance.unsqueeze(-1) * self.slopes.unsqueeze(0).unsqueeze(0)
+        slopes_on_device = self.slopes.to(device=device, dtype=dtype)
+        self.bias[...] = -distance.unsqueeze(-1) * slopes_on_device.unsqueeze(0).unsqueeze(0)
 
     def forward(
         self,
