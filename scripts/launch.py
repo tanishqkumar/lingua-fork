@@ -24,7 +24,7 @@ import argparse
 
 # Cluster configs in priority order: (name, ssh_host, ssh_pass, partition, job_script, max_nodes)
 CLUSTERS = [
-    ("mk-turbo", "mk-turbo-hn", None, "batch", "scripts/jobs/together_turbo.sh", 1),
+    ("mk-turbo", "mk-turbo-hn", None, "batch", "scripts/jobs/together_turbo.sh", 99),
     ("research-secure", "research-secure-hn", None, "batch", "scripts/jobs/together_secure.sh", 1),
     ("sphinx", "tanishq@sc.stanford.edu", "december1972", "sphinx", "scripts/jobs/stanford_sphinx.sh", 2),
     ("miso", "tanishq@sc.stanford.edu", "december1972", "miso", "scripts/jobs/stanford_miso.sh", 1),
