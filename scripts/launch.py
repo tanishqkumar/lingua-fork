@@ -1,180 +1,166 @@
 #!/usr/bin/env python3
 """
-Multi-cluster training launcher for lingua-fork.
+Smart multi-cluster launcher that checks for idle nodes before submitting.
 
-This script:
-1. Detects the current cluster or uses the specified one
-2. Resolves paths (data_root, dump_base) for the cluster
-3. Sets up WandB tags/group based on experiment name and cluster
-4. Launches training with torchrun
+Checks clusters in priority order and submits to the first one with idle nodes.
 
 Usage:
-    # Auto-detect cluster and launch
-    python scripts/launch.py --config apps/main/configs/debug.yaml --experiment "lr_sweep"
+    # Check availability and submit to best cluster
+    python scripts/launch.py -c apps/main/configs/debug.yaml -e my_experiment
 
-    # Specify cluster explicitly
-    python scripts/launch.py --config apps/main/configs/debug.yaml --cluster research-secure
+    # Dry run - just check availability
+    python scripts/launch.py --dry-run
 
-    # Override specific settings
-    python scripts/launch.py --config apps/main/configs/debug.yaml --experiment "test" steps=500 model.dim=512
+    # Force specific cluster (skip idle check)
+    python scripts/launch.py --cluster research-secure -c apps/main/configs/debug.yaml
+
+    # Pass extra training args
+    python scripts/launch.py -c apps/main/configs/debug.yaml -e test -x "steps=500 model.dim=512"
 """
 
-import argparse
-import os
 import subprocess
 import sys
-from pathlib import Path
+import argparse
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from lingua.cluster import (
-    CLUSTER_CONFIGS,
-    LAUNCH_PRIORITY,
-    detect_cluster,
-    get_cluster_config,
-    get_wandb_tags,
-    get_wandb_group,
-)
+# Cluster configs in priority order: (name, ssh_host, ssh_pass, partition, job_script)
+CLUSTERS = [
+    ("research-secure", "research-secure-hn", None, "batch", "scripts/jobs/together_secure.sh"),
+    ("mk-turbo", "mk-turbo-hn", None, "batch", "scripts/jobs/together_turbo.sh"),
+    ("sphinx", "tanishq@sc.stanford.edu", "december1972", "sphinx", "scripts/jobs/stanford_sphinx.sh"),
+    ("miso", "tanishq@sc.stanford.edu", "december1972", "miso", "scripts/jobs/stanford_miso.sh"),
+]
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Multi-cluster training launcher")
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to config YAML file",
-    )
-    parser.add_argument(
-        "--cluster",
-        type=str,
-        choices=list(CLUSTER_CONFIGS.keys()),
-        default=None,
-        help="Target cluster (auto-detected if not specified)",
-    )
-    parser.add_argument(
-        "--experiment",
-        type=str,
-        default=None,
-        help="Experiment name for WandB grouping (e.g., 'lr_sweep', 'arch_ablation')",
-    )
-    parser.add_argument(
-        "--nproc",
-        type=int,
-        default=None,
-        help="Number of processes (GPUs). Defaults to cluster's gpus_per_node.",
-    )
-    parser.add_argument(
-        "--nodes",
-        type=int,
-        default=1,
-        help="Number of nodes (default: 1)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print command without executing",
-    )
-    parser.add_argument(
-        "--wandb-entity",
-        type=str,
-        default=None,
-        help="WandB entity (team/username)",
-    )
-    parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="lingua-fork",
-        help="WandB project name",
-    )
-    parser.add_argument(
-        "--no-wandb",
-        action="store_true",
-        help="Disable WandB logging",
-    )
-    # All remaining args are passed to train.py as OmegaConf overrides
-    parser.add_argument(
-        "overrides",
-        nargs="*",
-        help="Config overrides in OmegaConf format (e.g., steps=1000 model.dim=512)",
-    )
-
-    return parser.parse_args()
-
-
-def build_command(args):
-    """Build the torchrun command with all necessary arguments."""
-    # Detect or use specified cluster
-    cluster_name = args.cluster or detect_cluster()
-    if cluster_name is None:
-        print("ERROR: Could not detect cluster. Please specify with --cluster")
-        print(f"Available clusters: {list(CLUSTER_CONFIGS.keys())}")
-        sys.exit(1)
-
-    config = get_cluster_config(cluster_name)
-    print(f"Using cluster: {config.name} ({config.cluster})")
-    print(f"  GPU Type: {config.gpu_type}")
-    print(f"  Data Root: {config.data_root}")
-    print(f"  Dump Base: {config.dump_base}")
-
-    # Determine number of processes
-    nproc = args.nproc or config.gpus_per_node
-    if nproc > config.gpus_per_node * config.max_nodes:
-        print(f"WARNING: Requested {nproc} GPUs but cluster max is {config.gpus_per_node * config.max_nodes}")
-
-    # Build torchrun command
-    cmd = [
-        "torchrun",
-        f"--nproc_per_node={nproc}",
-        "--standalone",
-        "-m", "apps.main.train",
-        f"config={args.config}",
-    ]
-
-    # Add cluster-specific path overrides
-    cmd.append(f"data.root_dir={config.data_root}")
-    cmd.append(f"dump_base={config.dump_base}")
-
-    # Add WandB configuration
-    if not args.no_wandb:
-        tags = get_wandb_tags(cluster_name, args.experiment)
-        tags_str = "[" + ",".join(tags) + "]"
-        cmd.append(f"logging.wandb.tags={tags_str}")
-        cmd.append(f"logging.wandb.project={args.wandb_project}")
-
-        if args.experiment:
-            group = get_wandb_group(args.experiment, cluster_name)
-            cmd.append(f"logging.wandb.group={group}")
-
-        if args.wandb_entity:
-            cmd.append(f"logging.wandb.entity={args.wandb_entity}")
+def ssh_cmd(host: str, cmd: str, password: str = None, timeout: int = 15) -> tuple[int, str]:
+    """Run SSH command, return (returncode, output)."""
+    if password:
+        full_cmd = ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no", host, cmd]
     else:
-        cmd.append("logging.wandb=null")
+        full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", host, cmd]
 
-    # Add any user-provided overrides
-    cmd.extend(args.overrides)
+    try:
+        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        return 1, "timeout"
+    except Exception as e:
+        return 1, str(e)
 
-    return cmd
+
+def check_idle_nodes(host: str, partition: str, password: str = None) -> int:
+    """Check how many nodes are idle on a partition. Returns count of idle nodes."""
+    cmd = f"sinfo -p {partition} -t idle -h -o '%D' 2>/dev/null | head -1"
+    code, output = ssh_cmd(host, cmd, password)
+
+    if code != 0:
+        return 0
+
+    try:
+        # Handle empty output
+        output = output.strip()
+        if not output:
+            return 0
+        return int(output)
+    except (ValueError, AttributeError):
+        return 0
+
+
+def submit_job(host: str, job_script: str, password: str = None,
+               config: str = None, experiment: str = None, extra_args: str = None) -> tuple[bool, str]:
+    """Submit a job to the cluster. Returns (success, message)."""
+    env_parts = []
+    if config:
+        env_parts.append(f"CONFIG={config}")
+    if experiment:
+        env_parts.append(f"EXPERIMENT={experiment}")
+    if extra_args:
+        env_parts.append(f"EXTRA_ARGS='{extra_args}'")
+
+    env_str = " ".join(env_parts) + " " if env_parts else ""
+    cmd = f"cd ~/lingua-fork && {env_str}sbatch {job_script}"
+
+    code, output = ssh_cmd(host, cmd, password, timeout=30)
+    return code == 0, output.strip()
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser(
+        description="Smart launcher - checks idle nodes before submitting",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--config", "-c", default="apps/main/configs/debug.yaml",
+                        help="Config file path")
+    parser.add_argument("--experiment", "-e", default="default",
+                        help="Experiment name for WandB grouping")
+    parser.add_argument("--extra", "-x", default="",
+                        help="Extra args passed to training (e.g., 'steps=500 model.dim=512')")
+    parser.add_argument("--cluster", choices=[c[0] for c in CLUSTERS],
+                        help="Force specific cluster (skips idle check)")
+    parser.add_argument("--dry-run", "-n", action="store_true",
+                        help="Check availability without submitting")
+    args = parser.parse_args()
 
-    cmd = build_command(args)
+    print("Checking cluster availability (priority order)...")
+    print("-" * 60)
 
-    print("\nCommand:")
-    print("  " + " \\\n    ".join(cmd))
-    print()
+    selected = None
+    results = []
+
+    for name, host, password, partition, job_script in CLUSTERS:
+        # If user specified a cluster, only check that one
+        if args.cluster and args.cluster != name:
+            continue
+
+        idle = check_idle_nodes(host, partition, password)
+        status = f"{idle} idle node(s)" if idle > 0 else "no idle nodes"
+
+        is_selected = False
+        if idle > 0 and selected is None:
+            selected = (name, host, password, partition, job_script)
+            is_selected = True
+
+        results.append((name, idle, is_selected))
+
+    for name, idle, is_selected in results:
+        marker = " <-- SELECTED" if is_selected else ""
+        status = f"{idle} idle" if idle > 0 else "busy"
+        print(f"  {name:20} {status}{marker}")
+
+    print("-" * 60)
+
+    if selected is None:
+        if args.cluster:
+            print(f"Cluster '{args.cluster}' has no idle nodes.")
+        else:
+            print("No clusters with idle nodes found. Try again later.")
+        sys.exit(1)
+
+    name, host, password, partition, job_script = selected
 
     if args.dry_run:
-        print("(dry run - not executing)")
-        return
+        print(f"Would submit to: {name}")
+        print(f"  Config: {args.config}")
+        print(f"  Experiment: {args.experiment}")
+        if args.extra:
+            print(f"  Extra args: {args.extra}")
+        sys.exit(0)
 
-    # Execute
-    env = os.environ.copy()
-    result = subprocess.run(cmd, env=env)
-    sys.exit(result.returncode)
+    print(f"Submitting to {name}...")
+    print(f"  Config: {args.config}")
+    print(f"  Experiment: {args.experiment}")
+
+    success, output = submit_job(
+        host, job_script, password,
+        config=args.config,
+        experiment=args.experiment,
+        extra_args=args.extra if args.extra else None
+    )
+
+    if success:
+        print(f"Success: {output}")
+    else:
+        print(f"Failed: {output}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
