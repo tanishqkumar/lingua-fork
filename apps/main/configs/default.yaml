@@ -14,7 +14,7 @@ seed: 42
 optim:
     optimizer: adamw
     scheduler: cosine
-    lr: 1e-3
+    lr: 3e-4
     warmup: 100
     lr_min_ratio: 0.1
     clip: 1.0
