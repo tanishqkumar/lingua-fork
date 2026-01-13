@@ -178,6 +178,8 @@ class RotaryEmbedding(torch.nn.Module):
 
 class NoPosEmbed(nn.Module):
     """No positional embedding (for ablations)."""
+    embed_type = "none"  # Indicates this returns None
+
     def __init__(self, **kwargs):
         super().__init__()
 
@@ -188,9 +190,243 @@ class NoPosEmbed(nn.Module):
         return None
 
 
+class ALiBiEmbedding(nn.Module):
+    """
+    ALiBi: Attention with Linear Biases (Press et al., 2021)
+    https://arxiv.org/abs/2108.12409
+
+    Instead of adding positional embeddings to tokens, ALiBi adds a static,
+    non-learned bias to attention scores: bias[i,j] = -m * |i - j|
+    where m is a head-specific slope.
+
+    Slopes are computed as a geometric sequence:
+    - For n_heads being power of 2: m_i = 2^(-8/n * i) for i in [1, n]
+    - For non-power of 2: combine slopes from closest power of 2 and half of that
+
+    Reference: https://github.com/ofirpress/attention_with_linear_biases
+    """
+    embed_type = "alibi"  # Indicates this returns attention bias
+
+    def __init__(
+        self,
+        n_heads: int,
+        max_seqlen: int = 1024,
+        **kwargs,
+    ):
+        super().__init__()
+        self.n_heads = n_heads
+        self.max_seqlen = max_seqlen
+
+        # Compute slopes following the paper's geometric sequence
+        slopes = self._get_alibi_slopes(n_heads)
+        self.register_buffer("slopes", slopes, persistent=False)
+
+        # Precompute bias matrix for max_seqlen
+        # Will be computed in reset_parameters
+        self.register_buffer(
+            "bias",
+            torch.zeros((max_seqlen, max_seqlen, n_heads)),
+            persistent=False,
+        )
+
+    def _get_alibi_slopes(self, n_heads: int) -> torch.Tensor:
+        """
+        Compute head-specific slopes for ALiBi.
+
+        For n_heads = 8: slopes = [1/2, 1/4, 1/8, 1/16, 1/32, 1/64, 1/128, 1/256]
+                                = 2^(-1), 2^(-2), ..., 2^(-8)
+
+        The ratio is 2^(-8/n_heads) raised to powers 1, 2, ..., n_heads.
+        """
+        def get_slopes_power_of_2(n: int) -> torch.Tensor:
+            start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+            ratio = start
+            return torch.tensor([start * (ratio ** i) for i in range(n)])
+
+        # Check if n_heads is power of 2
+        if math.log2(n_heads).is_integer():
+            return get_slopes_power_of_2(n_heads)
+        else:
+            # For non-power of 2, use closest power of 2 and half of it
+            closest_power_of_2 = 2 ** math.floor(math.log2(n_heads))
+            slopes_p2 = get_slopes_power_of_2(closest_power_of_2)
+
+            # Get additional slopes at half the base (skip every other)
+            extra_base = 2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3)))
+            extra_slopes = torch.tensor([
+                extra_base * (extra_base ** (2 * i))
+                for i in range(n_heads - closest_power_of_2)
+            ])
+
+            return torch.cat([slopes_p2, extra_slopes])
+
+    def reset_parameters(self):
+        """Precompute the ALiBi bias matrix."""
+        # Create distance matrix: distance[i, j] = |i - j|
+        positions = torch.arange(self.max_seqlen)
+        # For causal attention, we use: bias[i, j] = -m * (i - j) for j <= i
+        # This penalizes attending to tokens further in the past
+        distance = positions.unsqueeze(0) - positions.unsqueeze(1)  # [max_seqlen, max_seqlen]
+
+        # bias[i, j, h] = -slopes[h] * distance[i, j]
+        # Shape: [max_seqlen, max_seqlen, n_heads]
+        self.bias[...] = -distance.unsqueeze(-1) * self.slopes.unsqueeze(0).unsqueeze(0)
+
+    def forward(
+        self,
+        seqlen: Optional[int] = None,
+        tok_idx: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Returns ALiBi bias to be added to attention scores.
+
+        Returns:
+            Tensor of shape [seqlen, seqlen, n_heads] to be added to attention logits
+            before softmax. For SDPA, will need to be reshaped to [1, n_heads, seqlen, seqlen].
+        """
+        if seqlen is not None:
+            return self.bias[:seqlen, :seqlen, :]
+        elif tok_idx is not None:
+            # Handle token indices for incremental decoding
+            return self.bias[tok_idx, :tok_idx.max()+1, :]
+        else:
+            return self.bias
+
+
+class SinusoidalEmbedding(nn.Module):
+    """
+    Sinusoidal Positional Embeddings from "Attention is All You Need" (Vaswani et al., 2017)
+    https://arxiv.org/abs/1706.03762
+
+    PE(pos, 2i) = sin(pos / 10000^(2i/d))
+    PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+
+    These are added to token embeddings before the transformer layers.
+    """
+    embed_type = "additive"  # Indicates this returns additive embedding
+
+    def __init__(
+        self,
+        dim: int,
+        max_seqlen: int = 1024,
+        base: float = 10000.0,
+        **kwargs,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.max_seqlen = max_seqlen
+        self.base = base
+
+        # Precompute sinusoidal embeddings
+        self.register_buffer(
+            "embeddings",
+            torch.zeros((max_seqlen, dim)),
+            persistent=False,
+        )
+
+    def reset_parameters(self):
+        """Precompute sinusoidal positional embeddings."""
+        position = torch.arange(self.max_seqlen).unsqueeze(1).float()
+        div_term = torch.exp(
+            torch.arange(0, self.dim, 2).float() * -(math.log(self.base) / self.dim)
+        )
+
+        # PE(pos, 2i) = sin(pos / 10000^(2i/d))
+        self.embeddings[:, 0::2] = torch.sin(position * div_term)
+        # PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+        if self.dim % 2 == 0:
+            self.embeddings[:, 1::2] = torch.cos(position * div_term)
+        else:
+            # Handle odd dimensions
+            self.embeddings[:, 1::2] = torch.cos(position * div_term[:-1])
+
+    def forward(
+        self,
+        seqlen: Optional[int] = None,
+        tok_idx: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Returns sinusoidal embeddings to be added to token embeddings.
+
+        Returns:
+            Tensor of shape [seqlen, dim] to be added to token embeddings.
+        """
+        if seqlen is not None:
+            return self.embeddings[:seqlen, :]
+        elif tok_idx is not None:
+            return self.embeddings[tok_idx, :]
+        else:
+            return self.embeddings
+
+
+class LearnedEmbedding(nn.Module):
+    """
+    Learned Absolute Positional Embeddings (used in BERT, GPT-2, etc.)
+
+    Each position has a learnable embedding vector that is added to token embeddings.
+    This is essentially a lookup table indexed by position.
+
+    Note: "one-hot" refers to the fact that positions are one-hot encoded indices
+    into a learnable embedding matrix.
+    """
+    embed_type = "additive"  # Indicates this returns additive embedding
+
+    def __init__(
+        self,
+        dim: int,
+        max_seqlen: int = 1024,
+        **kwargs,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.max_seqlen = max_seqlen
+
+        # Learnable position embeddings
+        self.embeddings = nn.Parameter(torch.zeros(max_seqlen, dim))
+
+    def reset_parameters(self):
+        """Initialize position embeddings with truncated normal."""
+        init_std = self.dim ** (-0.5)
+        nn.init.trunc_normal_(
+            self.embeddings,
+            mean=0.0,
+            std=init_std,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+
+    def forward(
+        self,
+        seqlen: Optional[int] = None,
+        tok_idx: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Returns learned embeddings to be added to token embeddings.
+
+        Returns:
+            Tensor of shape [seqlen, dim] to be added to token embeddings.
+        """
+        if seqlen is not None:
+            return self.embeddings[:seqlen, :]
+        elif tok_idx is not None:
+            return self.embeddings[tok_idx, :]
+        else:
+            return self.embeddings
+
+
+# Add embed_type markers to existing classes
+RotaryEmbedding.embed_type = "rotary"
+NoPosEmbed.embed_type = "none"
+
+
 POSEMBED_REGISTRY: Dict[str, Type[nn.Module]] = {
     "rope": RotaryEmbedding,
     "none": NoPosEmbed,
+    "nope": NoPosEmbed,  # Alias for "no positional embedding"
+    "alibi": ALiBiEmbedding,
+    "sinusoidal": SinusoidalEmbedding,
+    "learned": LearnedEmbedding,
+    "onehot": LearnedEmbedding,  # Alias for learned embeddings
 }
 
 
@@ -571,18 +807,35 @@ class BaseTransformer(nn.Module):
         self.init_std_factor = InitStdFactor(args.init_std_factor)
         self.max_seqlen = args.max_seqlen
         self.pos_embed_type = args.pos_embed_type
+        self.n_heads = args.n_heads or args.dim // args.head_dim
 
         # Build positional embeddings from registry
         posembed_cls = POSEMBED_REGISTRY.get(args.pos_embed_type, RotaryEmbedding)
+
+        # Initialize based on positional embedding type
         if args.pos_embed_type == "rope":
-            self.rope_embeddings = posembed_cls(
+            self.pos_embeddings = posembed_cls(
                 theta=args.rope_theta,
                 head_dim=args.head_dim or args.dim // args.n_heads,
                 max_seqlen=args.max_seqlen,
                 rope_scaling=args.rope_scaling,
             )
+        elif args.pos_embed_type == "alibi":
+            self.pos_embeddings = posembed_cls(
+                n_heads=self.n_heads,
+                max_seqlen=args.max_seqlen,
+            )
+        elif args.pos_embed_type in ("sinusoidal", "learned", "onehot"):
+            self.pos_embeddings = posembed_cls(
+                dim=args.dim,
+                max_seqlen=args.max_seqlen,
+            )
         else:
-            self.rope_embeddings = posembed_cls()
+            # none/nope
+            self.pos_embeddings = posembed_cls()
+
+        # Store the embed type for fast dispatch
+        self._posembed_type = getattr(self.pos_embeddings, 'embed_type', 'none')
 
         self.layers = nn.ModuleList()
         for _ in range(args.n_layers):
@@ -595,14 +848,58 @@ class BaseTransformer(nn.Module):
         mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
         attn_impl: str = "sdpa",
     ):
-        freq_cis = self.rope_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+        bsz, seqlen, dim = h.shape
+        freq_cis = None
+
+        # Handle different positional embedding types
+        if self._posembed_type == "rotary":
+            # RoPE: get frequency tensor for rotary embeddings
+            freq_cis = self.pos_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+
+        elif self._posembed_type == "alibi":
+            # ALiBi: get attention bias and combine with mask
+            alibi_bias = self.pos_embeddings(seqlen=seqlen, tok_idx=tok_idx)
+            # alibi_bias shape: [seqlen, seqlen, n_heads]
+            # For SDPA, we need [1, n_heads, seqlen, seqlen]
+            # Move to same device as h and convert dtype
+            alibi_mask = alibi_bias.to(device=h.device, dtype=h.dtype).permute(2, 0, 1).unsqueeze(0)
+
+            # Combine with causal mask
+            if attn_impl == "sdpa":
+                # Create causal mask (upper triangular = -inf)
+                causal = torch.triu(
+                    torch.full((seqlen, seqlen), float('-inf'), device=h.device, dtype=h.dtype),
+                    diagonal=1
+                )
+                # Add ALiBi bias to causal mask
+                # ALiBi bias is 0 for same position, negative for attending to past
+                mask = causal.unsqueeze(0).unsqueeze(0) + alibi_mask
+            elif attn_impl == "fmha":
+                # For xformers fmha, create alibi as a tensor bias
+                # xformers expects [B, H, Q, K] or broadcastable
+                causal = torch.triu(
+                    torch.full((seqlen, seqlen), float('-inf'), device=h.device, dtype=h.dtype),
+                    diagonal=1
+                )
+                alibi_with_causal = causal.unsqueeze(0).unsqueeze(0) + alibi_mask
+                # Expand for batch size
+                mask = alibi_with_causal.expand(bsz, -1, -1, -1)
+
+        elif self._posembed_type == "additive":
+            # Sinusoidal or Learned: add to hidden states
+            pos_emb = self.pos_embeddings(seqlen=seqlen, tok_idx=tok_idx)
+            # pos_emb shape: [seqlen, dim]
+            # Move to same device as h and convert dtype
+            h = h + pos_emb.unsqueeze(0).to(device=h.device, dtype=h.dtype)
+
+        # elif self._posembed_type == "none": pass (no positional encoding)
 
         for i, layer in enumerate(self.layers):
             h = layer(h, freq_cis, tok_idx=tok_idx, mask=mask, attn_impl=attn_impl)
         return h
 
     def reset_parameters(self):
-        self.rope_embeddings.reset_parameters()
+        self.pos_embeddings.reset_parameters()
 
     def init_weights(self):
         self.reset_parameters()

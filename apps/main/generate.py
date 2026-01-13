@@ -438,8 +438,8 @@ def load_consolidated_model_and_tokenizer(
     for param in model.parameters():
         param.data = param.data.to(dtype=param_dtype)
 
-    # Init RoPE parameters
-    model.rope_embeddings.reset_parameters()
+    # Init positional embedding parameters
+    model.pos_embeddings.reset_parameters()
 
     return model, tokenizer, config
 

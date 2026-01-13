@@ -281,8 +281,8 @@ def train(args: TrainArgs):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
 
-        # Need to initialize RoPE embeddings outside of the "meta" device context, since the RoPE scaling logic involves .item() calls, which are not supported on meta devices.
-        model.rope_embeddings.reset_parameters()
+        # Need to initialize positional embeddings outside of the "meta" device context, since the RoPE scaling logic involves .item() calls, which are not supported on meta devices.
+        model.pos_embeddings.reset_parameters()
 
         check_model_value_range(model, range=10.0, std=1.0)
 
