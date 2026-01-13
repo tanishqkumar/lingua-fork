@@ -1,5 +1,38 @@
 # CLAUDE.md - lingua-fork Multi-Cluster Guide
 
+## IMPORTANT: Development Workflow
+
+**When implementing new features or making code changes, ALWAYS test interactively before launching batch jobs.**
+
+### Required Workflow:
+1. **Check for idle nodes** using `python scripts/launch.py --dry-run`
+2. **If idle nodes available**: Get an interactive node and test your changes:
+   ```bash
+   # Together AI (mk-turbo or research-secure)
+   ssh mk-turbo-hn
+   srun --partition=batch --gpus-per-node=1 --time=01:00:00 --mem=48G --pty bash
+   cd ~/lingua-fork && uv sync
+   uv run torchrun --nproc_per_node=1 --standalone -m apps.main.train config=apps/main/configs/debug.yaml steps=50
+
+   # Stanford (sphinx or miso)
+   sshpass -p 'december1972' ssh tanishq@sc.stanford.edu
+   srun --account=nlp --partition=sphinx --gres=gpu:1 --time=01:00:00 --mem=48G --pty bash
+   cd ~/lingua-fork && uv sync
+   uv run torchrun --nproc_per_node=1 --standalone -m apps.main.train config=apps/main/configs/debug.yaml steps=50
+   ```
+3. **Verify**: Training runs without errors AND loss decreases over steps
+4. **Only then**: Launch batch jobs or sweeps
+
+### If NO idle nodes available:
+- Make your changes carefully
+- Double-check the code for obvious errors
+- Launch jobs (they will queue until nodes free up)
+- Monitor the first job's logs to catch any issues early
+
+**Never launch sweeps or multiple jobs without first testing that the code runs and loss decreases.**
+
+---
+
 ## Quick Reference - Cluster Access
 
 | Cluster | SSH Host | Environment | Data Path | Max Nodes | GPU |
