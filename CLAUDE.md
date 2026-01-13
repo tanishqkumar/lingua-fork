@@ -1,57 +1,51 @@
 # CLAUDE.md - lingua-fork Setup Guide for Stanford Cluster
 
-## Training Throughput (Measured)
+## Setup (One-Time)
 
-| Setup | Model | Batch/GPU | Total Batch | Tokens/Step | Throughput | 500 Steps |
-|-------|-------|-----------|-------------|-------------|------------|-----------|
-| 1x A100 (sphinx) | 27.5M | 8 | 8 | 16K | ~140K tok/s | ~58s |
-| 8x H200 (miso) | 27.5M | 8 | 64 | 131K | ~460K tok/s | ~142s |
+```bash
+# 1. Clone repo (patches already included)
+git clone https://github.com/tanishqkumar/lingua-fork.git
+cd lingua-fork
 
-**Note**: Miso processed 8x more tokens per step, so despite taking longer wall-clock time, it has ~3.3x higher throughput.
+# 2. Install dependencies
+uv sync
+
+# 3. Create config file (see example below)
+# Data is at: /juice5/scr5/nlp/data/huggingface/lingua-data/
+```
+
+That is it. The patches for SLURM compatibility are already in the repo.
+
+## Running Training
+
+**sphinx (1-8x A100):**
+```bash
+sbatch --account=nlp --partition=sphinx --gres=gpu:1 --time=01:00:00 --mem=48G \
+  --wrap="cd ~/lingua-fork && uv run torchrun --nproc_per_node=1 --standalone -m apps.main.train config=my_config.yaml"
+```
+
+**miso (8x H200 only - must use all 8):**
+```bash
+sbatch --account=miso --partition=miso --gpus-per-task=8 --ntasks=1 --time=01:00:00 --mem=200G \
+  --wrap="cd ~/lingua-fork && uv run torchrun --nproc_per_node=8 --standalone -m apps.main.train config=my_config.yaml"
+```
 
 ## GPU Allocation Rules
 
-- **sphinx**: Can request any number of GPUs (1-8) per job with `--gres=gpu:N`
-- **miso**: Must use all 8 GPUs on a node - no partial allocations allowed. Always use `--gpus-per-task=8`
+- **sphinx**: Can request 1-8 GPUs with `--gres=gpu:N`
+- **miso**: Must use all 8 GPUs on a node - no partial allocations
 
-## Quick Start
+## Training Throughput (Measured)
 
-**Single GPU (sphinx - A100):**
-```bash
-sbatch --account=nlp --partition=sphinx --gres=gpu:1 --time=00:30:00 --mem=48G \
-  --output=/juice5b/scr5b/tanishq/lingua-logs/%j.out \
-  --error=/juice5b/scr5b/tanishq/lingua-logs/%j.err \
-  --wrap="cd ~/lingua-fork && uv run torchrun --nproc_per_node=1 --standalone -m apps.main.train config=/juice5b/scr5b/tanishq/lingua-configs/sphinx_test.yaml"
-```
-
-**8 GPU (miso - H200):**
-```bash
-sbatch --account=miso --partition=miso --gpus-per-task=8 --ntasks=1 --time=00:30:00 --mem=200G \
-  --output=/juice5b/scr5b/tanishq/lingua-logs/%j.out \
-  --error=/juice5b/scr5b/tanishq/lingua-logs/%j.err \
-  --wrap="cd ~/lingua-fork && uv run torchrun --nproc_per_node=8 --standalone -m apps.main.train config=/juice5b/scr5b/tanishq/lingua-configs/miso_test.yaml"
-```
-
-## Key Paths
-
-| Path | Description |
-|------|-------------|
-| `~/lingua-fork` | Code (AFS) |
-| `/juice5b/scr5b/tanishq/lingua-venv` | Python venv (symlinked from .venv) |
-| `/juice5b/scr5b/tanishq/lingua-configs/` | Config files |
-| `/juice5b/scr5b/tanishq/lingua-logs/` | Job logs |
-| `/juice5b/scr5b/tanishq/lingua-out/` | Checkpoints |
-| `/juice5/scr5/nlp/data/huggingface/lingua-data/` | Training data |
-
-## Patches Applied
-
-1. **lingua/distributed.py:257** - Removed `mp.set_start_method` and `mp.Manager()` that hang in SLURM
-2. **apps/main/train.py** - Added null checks for `wandb.id` and `eval`
+| Setup | Tokens/Step | Throughput | 500 Steps |
+|-------|-------------|------------|-----------|
+| 1x A100 (sphinx) | 16K | ~140K tok/s | ~58s |
+| 8x H200 (miso) | 131K | ~460K tok/s | ~142s |
 
 ## Example Config
 
 ```yaml
-dump_dir: /juice5b/scr5b/tanishq/lingua-out/my_run
+dump_dir: /juice5b/scr5b/YOUR_USERNAME/lingua-out/my_run
 name: my_run
 steps: 500
 
@@ -89,3 +83,8 @@ checkpoint:
 
 eval: null
 ```
+
+## Patches Included
+
+1. **lingua/distributed.py:257** - Removed `mp.set_start_method` and `mp.Manager()` that hang in SLURM
+2. **apps/main/train.py** - Added null checks for `wandb.id` and `eval`
