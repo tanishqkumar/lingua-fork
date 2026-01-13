@@ -9,8 +9,8 @@
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
 
-# Stanford miso cluster job script (H100s)
-# Max: 1 node, 8x H100 per node
+# Stanford miso cluster job script (H200s)
+# Max: 1 node, 8x H200 per node
 # NOTE: miso requires using all 8 GPUs per node
 
 set -e
@@ -34,10 +34,15 @@ NGPUS=8
 CONFIG=${CONFIG:-apps/main/configs/debug.yaml}
 EXPERIMENT=${EXPERIMENT:-default}
 
+# Build run name: experiment_cluster_jobid (e.g., lr_sweep_miso_12345)
+RUN_NAME="${EXPERIMENT}_miso_${SLURM_JOB_ID}"
+
 echo "=== Training Config ==="
 echo "Config: $CONFIG"
 echo "Experiment: $EXPERIMENT"
+echo "Run Name: $RUN_NAME"
 echo "GPUs: $NGPUS"
+echo "Extra Args: $EXTRA_ARGS"
 
 # Run training with uv
 uv run torchrun \
@@ -45,9 +50,11 @@ uv run torchrun \
     --standalone \
     -m apps.main.train \
     config=$CONFIG \
-    logging.wandb.project=lingua-fork \
-    logging.wandb.tags="[stanford,miso,H100,$EXPERIMENT]" \
-    logging.wandb.group="$EXPERIMENT/stanford/miso" \
+    name=$RUN_NAME \
+    logging.wandb.project=tanishqbot \
+    logging.wandb.name=$RUN_NAME \
+    logging.wandb.tags="[stanford,miso,H200,$EXPERIMENT,job_$SLURM_JOB_ID]" \
+    logging.wandb.group="$EXPERIMENT/miso" \
     $EXTRA_ARGS
 
 echo "=== Done ==="

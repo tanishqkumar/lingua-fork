@@ -50,7 +50,15 @@ sbatch scripts/jobs/together_secure.sh
 - Default configs are tuned for **H100/H200**
 - On **A100** (sphinx): batch_size is automatically halved and grad_acc_steps doubled
 - Paths are auto-resolved based on detected cluster
-- WandB tags are auto-set: `[cluster, partition, gpu_type]`
+
+## WandB Integration
+
+**Project**: `tk07-stanford-university/tanishqbot`
+
+Runs are automatically named and tagged for easy filtering:
+- **Run Name**: `{experiment}_{cluster}_{job_id}` (e.g., `lr_sweep_sphinx_12345`)
+- **Tags**: `[provider, cluster, gpu_type, experiment, job_id]`
+- **Group**: `{experiment}/{cluster}`
 
 ## Registry Pattern
 

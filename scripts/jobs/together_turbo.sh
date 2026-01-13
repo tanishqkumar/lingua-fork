@@ -36,10 +36,15 @@ NGPUS=${SLURM_GPUS_ON_NODE:-8}
 CONFIG=${CONFIG:-apps/main/configs/debug.yaml}
 EXPERIMENT=${EXPERIMENT:-default}
 
+# Build run name: experiment_cluster_jobid (e.g., lr_sweep_mk-turbo_12345)
+RUN_NAME="${EXPERIMENT}_mk-turbo_${SLURM_JOB_ID}"
+
 echo "=== Training Config ==="
 echo "Config: $CONFIG"
 echo "Experiment: $EXPERIMENT"
+echo "Run Name: $RUN_NAME"
 echo "GPUs: $NGPUS"
+echo "Extra Args: $EXTRA_ARGS"
 
 # Run training with uv run
 uv run torchrun \
@@ -47,9 +52,11 @@ uv run torchrun \
     --standalone \
     -m apps.main.train \
     config=$CONFIG \
-    logging.wandb.project=lingua-fork \
-    logging.wandb.tags="[together,mk-turbo,H100,$EXPERIMENT]" \
-    logging.wandb.group="$EXPERIMENT/together/mk-turbo" \
+    name=$RUN_NAME \
+    logging.wandb.project=tanishqbot \
+    logging.wandb.name=$RUN_NAME \
+    logging.wandb.tags="[together,mk-turbo,H100,$EXPERIMENT,job_$SLURM_JOB_ID]" \
+    logging.wandb.group="$EXPERIMENT/mk-turbo" \
     $EXTRA_ARGS
 
 echo "=== Done ==="

@@ -159,11 +159,19 @@ torchrun --nproc_per_node=1 --standalone -m apps.main.train \
 
 ## WandB Integration
 
-All runs log to WandB with automatic tagging:
-- **Tags**: `[cluster, partition, gpu_type, experiment]`
-- **Group**: `experiment/cluster/partition`
+**Project**: `tk07-stanford-university/tanishqbot`
 
-Example: `lr_sweep/together/research-secure`
+All runs log to WandB with automatic naming, tagging, and grouping:
+
+- **Run Name**: `{experiment}_{cluster}_{slurm_job_id}` (e.g., `lr_sweep_sphinx_12345`)
+- **Tags**: `[provider, cluster, gpu_type, experiment, job_{slurm_job_id}]`
+  - Example: `[stanford, sphinx, A100, lr_sweep, job_12345]`
+- **Group**: `{experiment}/{cluster}` (e.g., `lr_sweep/sphinx`)
+
+This makes it easy to:
+1. Filter by experiment name to see all runs in a sweep
+2. Filter by cluster to compare performance across hardware
+3. Track back to SLURM job ID for debugging
 
 To disable WandB:
 ```bash
@@ -246,7 +254,7 @@ data:
 logging:
   freq: 10
   wandb:
-    project: lingua-fork
+    project: tanishqbot
 ```
 
 ---
