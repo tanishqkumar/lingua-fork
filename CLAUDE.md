@@ -7,7 +7,7 @@
 | **research-secure** | `research-secure-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
 | **mk-turbo** | `mk-turbo-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
 | **sphinx** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 2 | 8x A100 |
-| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 8x H200 |
+| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 1-8x H200 |
 
 **Priority Order**: research-secure > mk-turbo > sphinx > miso
 

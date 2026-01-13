@@ -4,21 +4,20 @@
 #SBATCH --account=nlp
 #SBATCH --partition=miso
 #SBATCH --nodes=1
-#SBATCH --gpus-per-task=8
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
 
 # Stanford miso cluster job script (H200s)
 # Max: 1 node, 8x H200 per node
-# NOTE: miso requires using all 8 GPUs per node
 
 set -e
 
 echo "=== Job Info ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $(hostname)"
-echo "GPUs: 8 (miso requires all 8)"
+echo "GPUs: $SLURM_GPUS_ON_NODE"
 echo "Start: $(date)"
 
 # Set cluster environment
@@ -51,8 +50,8 @@ fi
 # Sync dependencies
 uv sync
 
-# miso always uses 8 GPUs
-NGPUS=8
+# Get number of GPUs
+NGPUS=${SLURM_GPUS_ON_NODE:-8}
 
 # Default config if not provided
 CONFIG=${CONFIG:-apps/main/configs/debug.yaml}
