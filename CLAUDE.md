@@ -9,6 +9,11 @@
 
 **Note**: Miso processed 8x more tokens per step, so despite taking longer wall-clock time, it has ~3.3x higher throughput.
 
+## GPU Allocation Rules
+
+- **sphinx**: Can request any number of GPUs (1-8) per job with `--gres=gpu:N`
+- **miso**: Must use all 8 GPUs on a node - no partial allocations allowed. Always use `--gpus-per-task=8`
+
 ## Quick Start
 
 **Single GPU (sphinx - A100):**
