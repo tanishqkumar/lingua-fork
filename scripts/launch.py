@@ -130,10 +130,16 @@ def main():
 
     if selected is None:
         if args.cluster:
-            print(f"Cluster '{args.cluster}' has no idle nodes.")
+            # User forced a specific cluster, use it even if busy
+            for name, host, password, partition, job_script in CLUSTERS:
+                if name == args.cluster:
+                    selected = (name, host, password, partition, job_script)
+                    print(f"Warning: {args.cluster} has no idle nodes, submitting anyway...")
+                    break
         else:
-            print("No clusters with idle nodes found. Try again later.")
-        sys.exit(1)
+            # No idle nodes anywhere - fall back to priority order
+            print("Warning: No idle nodes found, using priority order...")
+            selected = CLUSTERS[0]  # First in priority order
 
     name, host, password, partition, job_script = selected
 
