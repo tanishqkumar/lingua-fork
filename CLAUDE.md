@@ -5,9 +5,9 @@
 | Cluster | SSH Host | Environment | Data Path | Max Nodes | GPU |
 |---------|----------|-------------|-----------|-----------|-----|
 | **research-secure** | `research-secure-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
-| **mk-turbo** | `mk-turbo-hn` | `uv` | `/data/tkumar/datasets` | 4 | 8x H100 |
+| **mk-turbo** | `mk-turbo-hn` | `uv` | `/data/tkumar/datasets` | 1 | 8x H100 |
 | **sphinx** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 2 | 8x A100 |
-| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 1-8x H200 |
+| **miso** | `tanishq@sc.stanford.edu` | `uv` | `/juice5/scr5/nlp/data/huggingface/lingua-data` | 1 | 8x H100 |
 
 **Priority Order**: research-secure > mk-turbo > sphinx > miso
 
@@ -36,7 +36,7 @@ Host mk-turbo-hn
 Host: sc.stanford.edu
 User: tanishq
 Password: december1972
-Partitions: sphinx (A100s), miso (H200s)
+Partitions: sphinx (A100s), miso (H100s)
 ```
 
 ---
@@ -73,7 +73,40 @@ This is commented out in `lingua/distributed.py` - we don't use xformers activat
 
 ---
 
-## Workflow: Local Edit → Cluster Run
+## Smart Launcher (Recommended)
+
+The smart launcher checks for idle nodes across all clusters and submits to the first available one:
+
+```bash
+# Check availability and submit to best cluster
+python scripts/launch.py -c apps/main/configs/debug.yaml -e my_experiment
+
+# Just check availability (dry run)
+python scripts/launch.py --dry-run
+
+# Force a specific cluster
+python scripts/launch.py --cluster sphinx -c apps/main/configs/debug.yaml
+
+# Pass extra training args
+python scripts/launch.py -c apps/main/configs/debug.yaml -e test -x "steps=500 model.dim=512"
+```
+
+Output example:
+```
+Checking cluster availability (priority order)...
+------------------------------------------------------------
+  research-secure      1 idle <-- SELECTED
+  mk-turbo             7 idle
+  sphinx               busy
+  miso                 busy
+------------------------------------------------------------
+Submitting to research-secure...
+Success: Submitted batch job 12345
+```
+
+---
+
+## Manual Workflow: Local Edit → Cluster Run
 
 ### 1. Clone locally (ground truth)
 ```bash
@@ -94,22 +127,15 @@ rsync -avz --exclude '.git' --exclude '__pycache__' --exclude '.venv' \
     . tanishq@sc.stanford.edu:~/lingua-fork/
 ```
 
-### 4. Launch training (priority order)
+### 4. Launch training
 ```bash
-# Try research-secure first (max 4 nodes)
+# Together AI
 ssh research-secure-hn
 sbatch scripts/jobs/together_secure.sh
 
-# If busy, try mk-turbo (max 1 node)
-ssh mk-turbo-hn
-sbatch scripts/jobs/together_turbo.sh
-
-# If Together is full, try Stanford sphinx (max 2 nodes)
+# Stanford
 ssh tanishq@sc.stanford.edu
 sbatch scripts/jobs/stanford_sphinx.sh
-
-# Last resort: Stanford miso (max 2 nodes)
-sbatch scripts/jobs/stanford_miso.sh
 ```
 
 ---
@@ -279,7 +305,7 @@ logging:
 | research-secure | 1x H100 | 16K | ~180K tok/s | ~45s |
 | mk-turbo | 1x H100 | 16K | ~180K tok/s | ~45s |
 | sphinx | 1x A100 | 16K | ~140K tok/s | ~58s |
-| miso | 8x H200 | 131K | ~460K tok/s | ~142s |
+| miso | 8x H100 | 131K | ~460K tok/s | ~142s |
 
 ---
 

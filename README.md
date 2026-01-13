@@ -18,15 +18,22 @@ Multi-cluster LLM pretraining framework. Fork of [Meta's lingua](https://github.
 git clone https://github.com/tanishqkumar/lingua-fork.git
 cd lingua-fork
 
+# Smart launch - automatically picks cluster with idle nodes
+python scripts/launch.py -c apps/main/configs/debug.yaml -e my_experiment
+
+# Or check availability without submitting
+python scripts/launch.py --dry-run
+```
+
+**Manual workflow:**
+```bash
 # Sync to cluster
 rsync -avz --exclude '.git' --exclude '__pycache__' --exclude '.venv' \
     . research-secure-hn:~/lingua-fork/
 
 # SSH and run
 ssh research-secure-hn
-cd ~/lingua-fork
-uv sync
-sbatch scripts/jobs/together_secure.sh
+cd ~/lingua-fork && uv sync && sbatch scripts/jobs/together_secure.sh
 ```
 
 ## Running Training
