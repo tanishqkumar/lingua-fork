@@ -82,6 +82,31 @@ model:
   pos_embed_type: rope  # rope, none
 ```
 
+## Scaling Experiments
+
+Training time benchmarks for different model sizes on 2B tokens.
+
+**Configuration:**
+- lr=1e-3, batch=256k tokens, seq_len=1024
+- 12 layers (fixed depth), varying width only
+- Cluster: research-secure (8x H100)
+
+| Non-Emb Params | dim  | Steps | Est. Time | Final Loss |
+|----------------|------|-------|-----------|------------|
+| 30.3M          | 448  | 7629  | ~2 hours  | ~3.6       |
+| 61.0M          | 640  | 7629  | ~2 hours  | ~3.5       |
+| 121.1M         | 896  | 7629  | ~2 hours  | ~3.6       |
+| 243.8M         | 1280 | 7629  | ~2.2 hours| ~3.6       |
+
+*Note: Times are estimates based on partial runs. Final losses are at ~40% progress.*
+
+**Config files:** `apps/main/configs/scaling/scale_{30m,60m,120m,240m}.yaml`
+
+**Launch:**
+```bash
+./scripts/launch_scaling.sh research-secure
+```
+
 ## Known Issues
 
 **xformers 0.0.31**: `AttributeError: 'xformers' object has no attribute 'efficient_attention_forward_cutlass'` - commented out in `lingua/distributed.py`, not needed for training.
