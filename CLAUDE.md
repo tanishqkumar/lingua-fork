@@ -2,6 +2,21 @@
 
 ## IMPORTANT: Development Workflow
 
+### Always Clone Fresh from GitHub
+**NEVER use existing local working directories.** At the start of each session:
+```bash
+rm -rf /tmp/lingua-fork  # Clean any stale copy
+git clone https://github.com/tanishqkumar/lingua-fork.git /tmp/lingua-fork
+cd /tmp/lingua-fork
+```
+
+### Session Cleanup
+**At the end of each session**, clean up the local clone:
+```bash
+rm -rf /tmp/lingua-fork
+```
+
+### Test Before Launching
 **When implementing new features or making code changes, ALWAYS test interactively before launching batch jobs.**
 
 ### Required Workflow:
